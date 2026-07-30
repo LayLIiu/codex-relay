@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent CDP"
+  short_description: "Inspect Chrome, Node, and React Native CDP targets from the CLI."
+  default_prompt: "Use agent-cdp to inspect the active debuggable target, capture runtime/network/trace/profile evidence, and report concise findings."

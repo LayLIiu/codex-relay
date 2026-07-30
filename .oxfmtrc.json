@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "dogfood-output/**",
+    "node_modules/**",
+    "packages/codex-relay/src/collaboration-mode-templates/**",
+    "apps/mobile/src/uniwind-types.d.ts",
+    "apps/mobile/ios/**",
+    "apps/mobile/android/**",
+    ".omx"
+  ]
+}

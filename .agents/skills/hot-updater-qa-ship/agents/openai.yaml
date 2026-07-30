@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hot Updater QA Ship"
+  short_description: "Deploy iOS OTA to one QA cohort at 0% rollout."
+  default_prompt: "Use $hot-updater-qa-ship to deploy the current iOS OTA to a QA target cohort."
