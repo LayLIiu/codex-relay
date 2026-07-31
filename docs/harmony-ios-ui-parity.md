@@ -1,4 +1,4 @@
-# Codex Relay iOS -> HarmonyOS UI 对照基线
+# Codex Relay iOS -> HarmonyOS UI 对照
 
 > 目的：这是鸿蒙 ArkTS 端还原 iOS UI 的唯一长期事实源。每次继续开发、构建或模拟器验收前，必须先阅读本文件；完成任何界面或交互后，必须回写实现范围、验证结果和截图/布局记录。
 >
