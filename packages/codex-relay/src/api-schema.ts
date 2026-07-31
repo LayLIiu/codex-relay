@@ -715,6 +715,9 @@ export const StreamThreadRunEventSchema = z.discriminatedUnion("type", [
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     delta: z.string(),
+    // 该片段在消息完整内容中的起始位置。客户端据此可安全忽略重连或
+    // 重复投递的同一 SSE 事件；省略时兼容旧版 Relay。
+    offset: z.number().int().nonnegative().optional(),
   }),
   z.object({
     type: z.literal("thread.message.completed"),

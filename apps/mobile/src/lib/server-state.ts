@@ -579,7 +579,13 @@ export function applyStreamEventToServerState(
       upsertMessageState(queryClient, event.thread, event.message);
       return;
     case "thread.message.delta":
-      appendMessageDeltaState(queryClient, event.threadId, event.messageId, event.delta);
+      appendMessageDeltaState(
+        queryClient,
+        event.threadId,
+        event.messageId,
+        event.delta,
+        event.offset,
+      );
       return;
     case "thread.message.completed":
       upsertThreadState(queryClient, event.thread);
@@ -681,6 +687,7 @@ function appendMessageDeltaState(
   threadId: string,
   messageId: string,
   delta: string,
+  offset?: number,
 ) {
   queryClient.setQueryData<ThreadDetailResponse>(serverStateKeys.thread(threadId), (current) => {
     if (!current) {
@@ -692,7 +699,7 @@ function appendMessageDeltaState(
         message.id === messageId
           ? {
               ...message,
-              content: `${message.content}${normalizeStreamDelta(message.content, delta)}`,
+              content: `${message.content}${normalizeStreamDelta(message.content, delta, offset)}`,
               state: "streaming",
               updatedAt: new Date().toISOString(),
             }
@@ -702,7 +709,21 @@ function appendMessageDeltaState(
   });
 }
 
-function normalizeStreamDelta(existingContent: string, incomingDelta: string) {
+function normalizeStreamDelta(existingContent: string, incomingDelta: string, offset?: number) {
+  if (offset !== undefined) {
+    if (offset > existingContent.length) {
+      return "";
+    }
+    const alreadyPresentLength = Math.min(incomingDelta.length, existingContent.length - offset);
+    if (
+      alreadyPresentLength > 0 &&
+      existingContent.slice(offset, offset + alreadyPresentLength) !==
+        incomingDelta.slice(0, alreadyPresentLength)
+    ) {
+      return "";
+    }
+    return incomingDelta.slice(alreadyPresentLength);
+  }
   if (!existingContent || !incomingDelta.startsWith(existingContent)) {
     return incomingDelta;
   }

@@ -3281,6 +3281,7 @@ async function runPromptStreamed(input: {
             threadId: activeThreadId,
             messageId: assistantMessage.id,
             delta: assistantPatch.delta,
+            offset: assistantPatch.offset,
           });
         }
       } else {
@@ -3712,6 +3713,7 @@ async function streamRunningAppServerThread(input: {
                 threadId: input.threadId,
                 messageId: itemId,
                 delta: patch.delta,
+                offset: patch.offset,
               });
             }
             return;
@@ -4320,6 +4322,7 @@ async function runAppServerPromptStreamed(input: {
                 threadId: activeThreadId,
                 messageId: itemId,
                 delta: patch.delta,
+                offset: patch.offset,
               });
             }
             return;
@@ -5350,12 +5353,13 @@ function appendMessageDelta(
   delta: string,
 ) {
   const existing = messagesByThreadId.get(threadId)?.find((message) => message.id === messageId);
+  const offset = existing?.content.length ?? 0;
   const normalizedDelta = normalizeStreamDelta(existing?.content ?? "", delta);
   const message = updateMessage(messagesByThreadId, threadId, messageId, {
     content: `${existing?.content ?? ""}${normalizedDelta}`,
     state: "streaming",
   });
-  return { delta: normalizedDelta, message };
+  return { delta: normalizedDelta, message, offset };
 }
 
 function normalizeStreamDelta(existingContent: string, incomingDelta: string) {

@@ -93,6 +93,35 @@ describe("mobile chat store stream handling", () => {
     );
   });
 
+  it("ignores a replayed delta when the stream offset is unchanged", () => {
+    const runningThread = threadSummary("thread-replayed-delta", "running");
+    replaceThreads([runningThread]);
+    setActiveThread(runningThread.id);
+
+    applyStreamEvent({
+      type: "thread.message.created",
+      thread: runningThread,
+      message: chatMessage("assistant-replayed", runningThread.id, "assistant", "", "streaming"),
+    });
+    applyStreamEvent({
+      type: "thread.message.delta",
+      threadId: runningThread.id,
+      messageId: "assistant-replayed",
+      delta: "你好",
+      offset: 0,
+    });
+    applyStreamEvent({
+      type: "thread.message.delta",
+      threadId: runningThread.id,
+      messageId: "assistant-replayed",
+      delta: "你好",
+      offset: 0,
+    });
+
+    const messages = chatStore$.messagesByThreadId[runningThread.id].peek();
+    expect(messages.find((message) => message.id === "assistant-replayed")?.content).toBe("你好");
+  });
+
   it("replaces a local stream message when the server sends its canonical id", () => {
     const runningThread = threadSummary("thread-replace", "running");
     replaceThreads([runningThread]);

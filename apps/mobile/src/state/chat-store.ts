@@ -582,7 +582,12 @@ export function markMessageApprovalResolved(threadId: string, messageId: string,
   });
 }
 
-export function appendMessageDelta(threadId: string, messageId: string, delta: string) {
+export function appendMessageDelta(
+  threadId: string,
+  messageId: string,
+  delta: string,
+  offset?: number,
+) {
   chatStore$.messagesByThreadId.set((current) => {
     const messages = current[threadId] ?? [];
     return {
@@ -591,7 +596,7 @@ export function appendMessageDelta(threadId: string, messageId: string, delta: s
         message.id === messageId
           ? {
               ...message,
-              content: `${message.content}${normalizeStreamDelta(message.content, delta)}`,
+              content: `${message.content}${normalizeStreamDelta(message.content, delta, offset)}`,
               state: "streaming",
               updatedAt: new Date().toISOString(),
             }
@@ -601,7 +606,21 @@ export function appendMessageDelta(threadId: string, messageId: string, delta: s
   });
 }
 
-function normalizeStreamDelta(existingContent: string, incomingDelta: string) {
+function normalizeStreamDelta(existingContent: string, incomingDelta: string, offset?: number) {
+  if (offset !== undefined) {
+    if (offset > existingContent.length) {
+      return "";
+    }
+    const alreadyPresentLength = Math.min(incomingDelta.length, existingContent.length - offset);
+    if (
+      alreadyPresentLength > 0 &&
+      existingContent.slice(offset, offset + alreadyPresentLength) !==
+        incomingDelta.slice(0, alreadyPresentLength)
+    ) {
+      return "";
+    }
+    return incomingDelta.slice(alreadyPresentLength);
+  }
   if (!existingContent || !incomingDelta.startsWith(existingContent)) {
     return incomingDelta;
   }
@@ -626,7 +645,7 @@ export function applyStreamEvent(
       }
       return;
     case "thread.message.delta":
-      appendMessageDelta(event.threadId, event.messageId, event.delta);
+      appendMessageDelta(event.threadId, event.messageId, event.delta, event.offset);
       return;
     case "thread.message.completed":
       if (canUpdateActiveThread) {
