@@ -1808,7 +1808,7 @@ export function createApp(options: AppOptions = {}) {
             authoritativeMessageCount: true,
           });
           const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
-          messages = mergeThreadMessagePages(
+          messages = resolveThreadHistoryMessages(
             rolloutHistory.messages,
             mergeAppServerMessagesWithLocalStatus(
               mapAppServerMessages(threadWithTurns),
@@ -1828,7 +1828,7 @@ export function createApp(options: AppOptions = {}) {
         } else {
           const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
           if (rolloutHistory.messages.length > 0) {
-            messages = mergeThreadMessagePages(rolloutHistory.messages, cachedMessages);
+            messages = resolveThreadHistoryMessages(rolloutHistory.messages, cachedMessages);
             responseThread = rememberRolloutThreadMessages(
               threads,
               responseThread,
@@ -1900,7 +1900,7 @@ export function createApp(options: AppOptions = {}) {
     if (baseThread && (cachedMessages.length > 0 || rolloutHistory.messages.length > 0)) {
       const messages =
         rolloutHistory.messages.length > 0
-          ? mergeThreadMessagePages(rolloutHistory.messages, cachedMessages)
+          ? resolveThreadHistoryMessages(rolloutHistory.messages, cachedMessages)
           : dedupeThreadMessages(cachedMessages);
       const responseThread = rememberRolloutThreadMessages(
         threads,
@@ -6340,8 +6340,31 @@ function mergeThreadMessagePages(incomingMessages: ChatMessage[], cachedMessages
   return dedupeThreadMessages(Array.from(byId.values()));
 }
 
+function resolveThreadHistoryMessages(
+  rolloutMessages: ChatMessage[],
+  fallbackMessages: ChatMessage[],
+) {
+  // JSONL 是跨 Relay 重启后仍然存在的原始会话记录。它包含完整对话时不能再和
+  // App Server/内存缓存按内容猜测合并，否则同一条消息会带着不同 id 再次插入时间线。
+  if (hasCompleteRolloutTranscript(rolloutMessages)) {
+    return canonicalRolloutTranscript(rolloutMessages);
+  }
+  return mergeThreadMessagePages(rolloutMessages, fallbackMessages);
+}
+
+function hasCompleteRolloutTranscript(messages: ChatMessage[]) {
+  return messages.some((message) => message.role === "user" || message.role === "assistant");
+}
+
+function canonicalRolloutTranscript(messages: ChatMessage[]) {
+  return [...messages].sort((left, right) => {
+    const timestampOrder = left.createdAt.localeCompare(right.createdAt);
+    return timestampOrder !== 0 ? timestampOrder : left.id.localeCompare(right.id);
+  });
+}
+
 function dedupeThreadMessages(messages: ChatMessage[]) {
-  const byCrossSourceKey = new Map<string, number>();
+  const crossSourceMessageIndexes = new Map<string, number[]>();
   const byImageKey = new Map<string, number>();
   const deduped: ChatMessage[] = [];
   const sortedMessages = [...messages].sort((left, right) =>
@@ -6350,12 +6373,19 @@ function dedupeThreadMessages(messages: ChatMessage[]) {
 
   for (const message of sortedMessages) {
     const crossSourceKey = crossSourceMessageKey(message);
-    const crossSourceIndex = crossSourceKey ? byCrossSourceKey.get(crossSourceKey) : undefined;
-    if (crossSourceIndex !== undefined) {
-      const existingMessage = deduped[crossSourceIndex];
-      if (existingMessage && shouldPreferDuplicateThreadMessage(message, existingMessage)) {
-        deduped[crossSourceIndex] = message;
+    const indexes = crossSourceKey ? crossSourceMessageIndexes.get(crossSourceKey) : undefined;
+    const matchingIndex = indexes?.find((index) => {
+      const existingMessage = deduped[index];
+      return existingMessage ? isDuplicateCrossSourceMessage(existingMessage, message) : false;
+    });
+    if (matchingIndex !== undefined) {
+      const existingMessage = deduped[matchingIndex];
+      if (existingMessage) {
+        if (shouldPreferDuplicateThreadMessage(message, existingMessage)) {
+          deduped[matchingIndex] = message;
+        }
       }
+      indexes?.splice(indexes.indexOf(matchingIndex), 1);
       continue;
     }
 
@@ -6370,7 +6400,7 @@ function dedupeThreadMessages(messages: ChatMessage[]) {
     const imageKey = userImageMessageKey(message);
     if (!imageKey) {
       if (crossSourceKey) {
-        byCrossSourceKey.set(crossSourceKey, deduped.length);
+        appendCrossSourceMessageIndex(crossSourceMessageIndexes, crossSourceKey, deduped.length);
       }
       deduped.push(message);
       continue;
@@ -6380,7 +6410,7 @@ function dedupeThreadMessages(messages: ChatMessage[]) {
     if (existingIndex === undefined) {
       byImageKey.set(imageKey, deduped.length);
       if (crossSourceKey) {
-        byCrossSourceKey.set(crossSourceKey, deduped.length);
+        appendCrossSourceMessageIndex(crossSourceMessageIndexes, crossSourceKey, deduped.length);
       }
       deduped.push(message);
       continue;
@@ -6396,25 +6426,31 @@ function dedupeThreadMessages(messages: ChatMessage[]) {
 }
 
 function crossSourceMessageKey(message: ChatMessage) {
-  if (!isSyntheticHistoryMessageId(message.id)) {
-    return undefined;
-  }
   if (message.role !== "user" && message.role !== "assistant") {
     return undefined;
   }
   return [
     message.threadId,
-    message.createdAt.slice(0, 19),
     message.role,
     message.kind,
     message.content,
   ].join("\n");
 }
 
+function appendCrossSourceMessageIndex(
+  indexesByKey: Map<string, number[]>,
+  key: string,
+  index: number,
+) {
+  const indexes = indexesByKey.get(key) ?? [];
+  indexes.push(index);
+  indexesByKey.set(key, indexes);
+}
+
 function isDuplicateCrossSourceMessage(previous: ChatMessage, next: ChatMessage) {
   return (
     previous.id !== next.id &&
-    (isSyntheticHistoryMessageId(previous.id) || isSyntheticHistoryMessageId(next.id)) &&
+    comesFromDifferentHistorySources(previous, next) &&
     previous.threadId === next.threadId &&
     previous.role === next.role &&
     previous.kind === next.kind &&
@@ -6422,8 +6458,12 @@ function isDuplicateCrossSourceMessage(previous: ChatMessage, next: ChatMessage)
   );
 }
 
-function isSyntheticHistoryMessageId(id: string) {
-  return id.startsWith("msg-") || id.startsWith("rollout:");
+function comesFromDifferentHistorySources(previous: ChatMessage, next: ChatMessage) {
+  return isRolloutHistoryMessageId(previous.id) !== isRolloutHistoryMessageId(next.id);
+}
+
+function isRolloutHistoryMessageId(id: string) {
+  return id.startsWith("rollout:");
 }
 
 function userImageMessageKey(message: ChatMessage) {
@@ -6556,6 +6596,7 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
 
   const collected: ChatMessage[] = [];
   const applyPatchInputs = new Map<string, string>();
+  const functionCalls = new Map<string, RolloutFunctionCall>();
   const handledApplyPatchCallIds = new Set<string>();
   const pendingApplyPatchChanges: RolloutPatchChange[] = [];
   const lines = readFileSync(rolloutPath, "utf8").split("\n");
@@ -6575,6 +6616,7 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
         type?: unknown;
       };
       rememberRolloutApplyPatchInput(record, applyPatchInputs);
+      rememberRolloutFunctionCall(record, functionCalls);
       collectRolloutApplyPatchOutput(
         record,
         workspacePath,
@@ -6582,6 +6624,16 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
         handledApplyPatchCallIds,
         pendingApplyPatchChanges,
       );
+      const functionCallMessage = rolloutFunctionCallOutputMessage(
+        threadId,
+        record,
+        `rollout:${lineNumber}`,
+        functionCalls,
+      );
+      if (functionCallMessage) {
+        collected.push(functionCallMessage);
+        continue;
+      }
       if (isRolloutTaskComplete(record) && pendingApplyPatchChanges.length > 0) {
         collected.push(
           rolloutApplyPatchSummaryMessage(
@@ -6656,6 +6708,68 @@ type RolloutPatchChange = {
   patch?: string;
   path: string;
 };
+
+type RolloutFunctionCall = {
+  arguments?: string;
+  name: string;
+};
+
+function rememberRolloutFunctionCall(
+  record: { payload?: Record<string, unknown>; type?: unknown },
+  functionCalls: Map<string, RolloutFunctionCall>,
+) {
+  const payload = record.payload;
+  if (record.type !== "response_item" || payload?.type !== "function_call") {
+    return;
+  }
+  const callId = firstString(payload, ["call_id"]);
+  const name = firstString(payload, ["name"]);
+  if (!callId || !name) {
+    return;
+  }
+  functionCalls.set(callId, {
+    arguments: firstString(payload, ["arguments"]),
+    name,
+  });
+}
+
+function rolloutFunctionCallOutputMessage(
+  threadId: string,
+  record: { payload?: Record<string, unknown>; timestamp?: unknown; type?: unknown },
+  messageKey: string,
+  functionCalls: ReadonlyMap<string, RolloutFunctionCall>,
+) {
+  const payload = record.payload;
+  if (record.type !== "response_item" || payload?.type !== "function_call_output") {
+    return undefined;
+  }
+  const callId = firstString(payload, ["call_id"]);
+  const call = callId ? functionCalls.get(callId) : undefined;
+  if (!call || !callId) {
+    return undefined;
+  }
+  const timestamp =
+    typeof record.timestamp === "string" ? record.timestamp : new Date().toISOString();
+  const outputPreview = largeTextPreview(firstString(payload, ["output"]));
+  return ChatMessageSchema.parse({
+    id: `${messageKey}:function:${callId}`,
+    threadId,
+    role: "tool",
+    kind: "toolActivity",
+    content: call.name,
+    createdAt: timestamp,
+    state: "completed",
+    details: {
+      arguments: call.arguments,
+      callId,
+      output: outputPreview?.text,
+      outputOriginalLength: outputPreview?.originalLength,
+      outputTruncated: outputPreview?.truncated,
+      status: "completed",
+      tool: call.name,
+    },
+  });
+}
 
 function rolloutRecordMessage(
   threadId: string,
@@ -7021,7 +7135,9 @@ function isRolloutMessageLine(line: string) {
         line.includes('"type":"mcp_tool_call_end"'))) ||
     (line.includes('"type":"response_item"') &&
       (line.includes('"type":"custom_tool_call"') ||
-        line.includes('"type":"custom_tool_call_output"')))
+        line.includes('"type":"custom_tool_call_output"') ||
+        line.includes('"type":"function_call"') ||
+        line.includes('"type":"function_call_output"')))
   );
 }
 

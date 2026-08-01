@@ -6563,6 +6563,12 @@ describe("Codex Relay server routes", () => {
       const body = await response.json();
 
       expect(response.status).toBe(200);
+      expect(
+        body.messages.filter(
+          (message: { content: string; role: string }) =>
+            message.role === "user" && message.content === "check tools",
+        ),
+      ).toHaveLength(1);
       expect(body.messages.some((message: { kind: string }) => message.kind === "commandExecution"))
         .toBe(true);
       expect(
@@ -6575,6 +6581,79 @@ describe("Codex Relay server routes", () => {
           output: "hello\n",
         },
         kind: "commandExecution",
+        role: "tool",
+      });
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  });
+
+  it("restores Codex function-call tool history after the mobile app restarts", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const codexHome = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
+    const sessionsDir = join(codexHome, "sessions", "2026", "05", "02");
+    await mkdir(sessionsDir, { recursive: true });
+    const threadId = "app-thread-rollout-function-call";
+    await writeFile(
+      join(sessionsDir, `rollout-2026-05-02T00-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          payload: { message: "inspect the repository", type: "user_message" },
+          timestamp: "2026-05-02T00:00:00.000Z",
+          type: "event_msg",
+        }),
+        JSON.stringify({
+          payload: {
+            arguments: '{"cmd":"git status --short","workdir":"/workspace"}',
+            call_id: "call_exec",
+            name: "exec_command",
+            type: "function_call",
+          },
+          timestamp: "2026-05-02T00:00:01.000Z",
+          type: "response_item",
+        }),
+        JSON.stringify({
+          payload: {
+            call_id: "call_exec",
+            output: "Chunk ID: abc123\nWall time: 0.01 seconds\nOutput:\n M src/app.ts",
+            type: "function_call_output",
+          },
+          timestamp: "2026-05-02T00:00:02.000Z",
+          type: "response_item",
+        }),
+        JSON.stringify({
+          payload: { message: "repository inspected", type: "agent_message" },
+          timestamp: "2026-05-02T00:00:03.000Z",
+          type: "event_msg",
+        }),
+      ].join("\n"),
+    );
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const app = createApp({
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    try {
+      const response = await app.request(`/v1/threads/${threadId}`);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.messages.map((message: { content: string }) => message.content)).toEqual([
+        "inspect the repository",
+        "exec_command",
+        "repository inspected",
+      ]);
+      expect(body.messages[1]).toMatchObject({
+        details: {
+          arguments: '{"cmd":"git status --short","workdir":"/workspace"}',
+          callId: "call_exec",
+          output: expect.stringContaining(" M src/app.ts"),
+          status: "completed",
+          tool: "exec_command",
+        },
+        kind: "toolActivity",
         role: "tool",
       });
     } finally {
@@ -7026,7 +7105,7 @@ describe("Codex Relay server routes", () => {
     }
   });
 
-  it("deduplicates cached live messages when rollout history arrives with different ids", async () => {
+  it("uses the rollout transcript as the stable history source without collapsing repeated messages", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     const codexHome = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
     const sessionsDir = join(codexHome, "sessions", "2026", "05", "02");
@@ -7067,6 +7146,16 @@ describe("Codex Relay server routes", () => {
             timestamp: assistantMessage.createdAt,
             type: "event_msg",
           }),
+          JSON.stringify({
+            payload: { message: userMessage.content, type: "user_message" },
+            timestamp: new Date(Date.parse(assistantMessage.createdAt) + 1000).toISOString(),
+            type: "event_msg",
+          }),
+          JSON.stringify({
+            payload: { message: assistantMessage.content, type: "agent_message" },
+            timestamp: new Date(Date.parse(assistantMessage.createdAt) + 2000).toISOString(),
+            type: "event_msg",
+          }),
         ].join("\n"),
       );
 
@@ -7075,6 +7164,8 @@ describe("Codex Relay server routes", () => {
 
       expect(detailResponse.status).toBe(200);
       expect(detailBody.messages.map((message: { content: string }) => message.content)).toEqual([
+        "Hi",
+        "streamed: Hi",
         "Hi",
         "streamed: Hi",
       ]);
