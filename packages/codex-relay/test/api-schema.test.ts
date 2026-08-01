@@ -189,17 +189,63 @@ describe("push notification schemas", () => {
     });
   });
 
-  it("accepts a generic Expo push registration without chat content", () => {
+  it("accepts provider-specific Expo and HMS push registrations", () => {
     expect(
       apiSchema.RegisterPushNotificationRequestSchema.parse({
-        expoPushToken: "ExponentPushToken[phone-token]",
+        provider: "expo",
+        token: "ExponentPushToken[phone-token]",
         platform: "ios",
         preferences: { actionRequired: true, turnTerminal: false },
       }),
     ).toEqual({
-      expoPushToken: "ExponentPushToken[phone-token]",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       platform: "ios",
       preferences: { actionRequired: true, turnTerminal: false },
     });
+    expect(
+      apiSchema.RegisterPushNotificationRequestSchema.parse({
+        provider: "hms",
+        token: "hms-device-token",
+        platform: "harmony",
+        preferences: { actionRequired: false, turnTerminal: true },
+      }),
+    ).toEqual({
+      provider: "hms",
+      token: "hms-device-token",
+      platform: "harmony",
+      preferences: { actionRequired: false, turnTerminal: true },
+    });
+  });
+
+  it("normalizes legacy Expo registration and rejects provider/platform mismatches", () => {
+    expect(
+      apiSchema.RegisterPushNotificationRequestSchema.parse({
+        expoPushToken: "ExponentPushToken[legacy-phone]",
+        platform: "android",
+        preferences: { actionRequired: true, turnTerminal: true },
+      }),
+    ).toEqual({
+      provider: "expo",
+      token: "ExponentPushToken[legacy-phone]",
+      platform: "android",
+      preferences: { actionRequired: true, turnTerminal: true },
+    });
+    expect(
+      apiSchema.RegisterPushNotificationRequestSchema.safeParse({
+        provider: "hms",
+        token: "hms-device-token",
+        platform: "android",
+        preferences: { actionRequired: true, turnTerminal: true },
+      }).success,
+    ).toBe(false);
+    expect(
+      apiSchema.RegisterPushNotificationRequestSchema.safeParse({
+        provider: "expo",
+        token: "hms-device-token",
+        platform: "harmony",
+        preferences: { actionRequired: true, turnTerminal: true },
+      }).success,
+    ).toBe(false);
   });
 });

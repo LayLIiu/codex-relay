@@ -23,6 +23,10 @@ import { createTursoPairingSessionStore } from "./pairing-store.js";
 import { codexRelayDataPath, legacyCodexRelayDataPath } from "./paths.js";
 import { createFileRuntimePreferencesStore } from "./preferences-store.js";
 import {
+  createHmsPushNotificationSender,
+  loadHmsPushConfiguration,
+} from "./push-notifications.js";
+import {
   createServerIdentity,
   createServerIdentityFromPrivateKey,
   type ServerIdentity,
@@ -60,6 +64,7 @@ const sessionStore = await createTursoPairingSessionStore(
 const preferencesStore = createFileRuntimePreferencesStore(
   process.env.CODEX_RELAY_PREFERENCES_PATH ?? (await prepareCodexRelayDataPath("preferences.json")),
 );
+const hmsPushConfiguration = await loadHmsPushConfiguration();
 const appServerMode = resolveCodexAppServerMode();
 const relayAppServer =
   appServerMode.mode === "socket"
@@ -84,6 +89,9 @@ serve(
   {
     fetch: createApp({
       appServer: relayAppServer,
+      hmsPushNotificationSender: hmsPushConfiguration
+        ? createHmsPushNotificationSender(hmsPushConfiguration)
+        : undefined,
       pairing: {
         approvalSecret,
         dangerouslyAutoApprove,

@@ -3,6 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { fromByteArray, toByteArray } from "base64-js";
 
 import { connect } from "./libsql-database.js";
+import type {
+  PushNotificationPlatform,
+  PushNotificationProvider,
+} from "./api-schema.js";
 import type { SecureSession } from "./secure-transport.js";
 
 export type ClientSession = {
@@ -30,8 +34,9 @@ export type PushNotificationPreferences = {
 
 export type PushNotificationSubscription = PushNotificationPreferences & {
   clientSessionId: string;
-  expoPushToken: string;
-  platform: "android" | "ios";
+  platform: PushNotificationPlatform;
+  provider: PushNotificationProvider;
+  token: string;
 };
 
 export type PairingSessionStore = {
@@ -39,7 +44,10 @@ export type PairingSessionStore = {
   clearAll(): Promise<{ pendingPairingsCleared: number; sessionsCleared: number }>;
   countActive(now: number): Promise<number>;
   deletePushNotificationSubscription(clientSessionId: string): Promise<void>;
-  deletePushNotificationSubscriptionsByExpoPushToken(expoPushToken: string): Promise<void>;
+  deletePushNotificationSubscriptionsByToken(
+    provider: PushNotificationProvider,
+    token: string,
+  ): Promise<void>;
   createPendingPairing(pairing: PendingPairing): Promise<void>;
   createSession(tokenHash: string, session: ClientSession): Promise<number>;
   deleteSession(tokenHash: string): Promise<void>;
@@ -96,7 +104,8 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
 
     CREATE TABLE IF NOT EXISTS push_notification_subscriptions (
       client_session_id TEXT PRIMARY KEY,
-      expo_push_token TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      push_token TEXT NOT NULL,
       platform TEXT NOT NULL,
       turn_terminal_enabled INTEGER NOT NULL,
       action_required_enabled INTEGER NOT NULL,
@@ -105,6 +114,7 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
     );
   `);
   await ensurePairingSessionColumns();
+  await ensurePushNotificationSubscriptionColumns();
 
   async function countActive(now: number) {
     const row = await db
@@ -196,10 +206,12 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
         .prepare("DELETE FROM push_notification_subscriptions WHERE client_session_id = ?")
         .run(clientSessionId);
     },
-    async deletePushNotificationSubscriptionsByExpoPushToken(expoPushToken) {
+    async deletePushNotificationSubscriptionsByToken(provider, token) {
       await db
-        .prepare("DELETE FROM push_notification_subscriptions WHERE expo_push_token = ?")
-        .run(expoPushToken);
+        .prepare(
+          "DELETE FROM push_notification_subscriptions WHERE provider = ? AND push_token = ?",
+        )
+        .run(provider, token);
     },
     async createPendingPairing(pairing) {
       const now = Date.now();
@@ -286,7 +298,8 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
       const row = await db
         .prepare(
           `SELECT client_session_id AS clientSessionId,
-                  expo_push_token AS expoPushToken,
+                  provider,
+                  push_token AS token,
                   platform,
                   turn_terminal_enabled AS turnTerminal,
                   action_required_enabled AS actionRequired
@@ -332,7 +345,8 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
       const rows = await db
         .prepare(
           `SELECT subscriptions.client_session_id AS clientSessionId,
-                  subscriptions.expo_push_token AS expoPushToken,
+                  subscriptions.provider,
+                  subscriptions.push_token AS token,
                   subscriptions.platform,
                   subscriptions.turn_terminal_enabled AS turnTerminal,
                   subscriptions.action_required_enabled AS actionRequired
@@ -444,16 +458,18 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
         .prepare(
           `INSERT INTO push_notification_subscriptions (
              client_session_id,
-             expo_push_token,
+             provider,
+             push_token,
              platform,
              turn_terminal_enabled,
              action_required_enabled,
              created_at,
              updated_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(client_session_id) DO UPDATE SET
-             expo_push_token = excluded.expo_push_token,
+             provider = excluded.provider,
+             push_token = excluded.push_token,
              platform = excluded.platform,
              turn_terminal_enabled = excluded.turn_terminal_enabled,
              action_required_enabled = excluded.action_required_enabled,
@@ -461,7 +477,8 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
         )
         .run(
           subscription.clientSessionId,
-          subscription.expoPushToken,
+          subscription.provider,
+          subscription.token,
           subscription.platform,
           subscription.turnTerminal ? 1 : 0,
           subscription.actionRequired ? 1 : 0,
@@ -500,6 +517,63 @@ export async function createTursoPairingSessionStore(path: string): Promise<Pair
     if (!pendingColumns.has("client_session_id")) {
       await db.exec("ALTER TABLE pending_pairings ADD COLUMN client_session_id TEXT");
     }
+  }
+
+  async function ensurePushNotificationSubscriptionColumns() {
+    const rows = await db.prepare("PRAGMA table_info(push_notification_subscriptions)").all();
+    const columns = new Set(resultRows(rows).map((row) => String(row.name)));
+    if (columns.has("provider") && columns.has("push_token")) {
+      return;
+    }
+    if (!columns.has("expo_push_token")) {
+      throw new Error("Unsupported push_notification_subscriptions database schema.");
+    }
+
+    await db.transaction(async (transaction) => {
+      await transaction
+        .prepare(
+          "ALTER TABLE push_notification_subscriptions RENAME TO push_notification_subscriptions_legacy",
+        )
+        .run();
+      await transaction
+        .prepare(
+          `CREATE TABLE push_notification_subscriptions (
+             client_session_id TEXT PRIMARY KEY,
+             provider TEXT NOT NULL,
+             push_token TEXT NOT NULL,
+             platform TEXT NOT NULL,
+             turn_terminal_enabled INTEGER NOT NULL,
+             action_required_enabled INTEGER NOT NULL,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+           )`,
+        )
+        .run();
+      await transaction
+        .prepare(
+          `INSERT INTO push_notification_subscriptions (
+             client_session_id,
+             provider,
+             push_token,
+             platform,
+             turn_terminal_enabled,
+             action_required_enabled,
+             created_at,
+             updated_at
+           )
+           SELECT client_session_id,
+                  'expo',
+                  expo_push_token,
+                  platform,
+                  turn_terminal_enabled,
+                  action_required_enabled,
+                  created_at,
+                  updated_at
+           FROM push_notification_subscriptions_legacy`,
+        )
+        .run();
+      await transaction.prepare("DROP TABLE push_notification_subscriptions_legacy").run();
+    })();
   }
 }
 
@@ -541,10 +615,14 @@ function pushNotificationSubscriptionFromRow(
   row: Record<string, unknown>,
 ): PushNotificationSubscription | undefined {
   const platform = row.platform;
+  const provider = row.provider;
   if (
     typeof row.clientSessionId !== "string" ||
-    typeof row.expoPushToken !== "string" ||
-    (platform !== "android" && platform !== "ios")
+    typeof row.token !== "string" ||
+    (provider !== "expo" && provider !== "hms") ||
+    (platform !== "android" && platform !== "ios" && platform !== "harmony") ||
+    (provider === "expo" && platform === "harmony") ||
+    (provider === "hms" && platform !== "harmony")
   ) {
     return undefined;
   }
@@ -552,8 +630,9 @@ function pushNotificationSubscriptionFromRow(
   return {
     actionRequired: Number(row.actionRequired) === 1,
     clientSessionId: row.clientSessionId,
-    expoPushToken: row.expoPushToken,
     platform,
+    provider,
+    token: row.token,
     turnTerminal: Number(row.turnTerminal) === 1,
   };
 }

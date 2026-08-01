@@ -96,23 +96,58 @@ export const RuntimePreferencesResponseSchema = z.object({
 });
 
 export const PushNotificationIntentSchema = z.enum(["turn_terminal", "action_required"]);
+export const PushNotificationProviderSchema = z.enum(["expo", "hms"]);
+export const PushNotificationPlatformSchema = z.enum(["android", "ios", "harmony"]);
 
 export const PushNotificationPreferencesSchema = z.object({
   actionRequired: z.boolean(),
   turnTerminal: z.boolean(),
 });
 
-export const RegisterPushNotificationRequestSchema = z.object({
-  expoPushToken: z
-    .string()
-    .trim()
-    .regex(/^(?:Expo|Exponent)PushToken\[[^\]\r\n]{1,512}\]$/),
+const ExpoPushTokenSchema = z
+  .string()
+  .trim()
+  .regex(/^(?:Expo|Exponent)PushToken\[[^\]\r\n]{1,512}\]$/);
+
+const HmsPushTokenSchema = z.string().trim().min(1).max(4096).regex(/^[^\s\r\n]+$/);
+
+const ExpoPushNotificationRegistrationSchema = z.object({
+  provider: z.literal("expo"),
+  token: ExpoPushTokenSchema,
   platform: z.enum(["android", "ios"]),
   preferences: PushNotificationPreferencesSchema,
 });
 
-export const PushNotificationSettingsResponseSchema = z.object({
+const HmsPushNotificationRegistrationSchema = z.object({
+  provider: z.literal("hms"),
+  token: HmsPushTokenSchema,
+  platform: z.literal("harmony"),
   preferences: PushNotificationPreferencesSchema,
+});
+
+const LegacyExpoPushNotificationRegistrationSchema = z
+  .object({
+    expoPushToken: ExpoPushTokenSchema,
+    platform: z.enum(["android", "ios"]),
+    preferences: PushNotificationPreferencesSchema,
+  })
+  .transform((registration) => ({
+    platform: registration.platform,
+    preferences: registration.preferences,
+    provider: "expo" as const,
+    token: registration.expoPushToken,
+  }));
+
+export const RegisterPushNotificationRequestSchema = z.union([
+  ExpoPushNotificationRegistrationSchema,
+  HmsPushNotificationRegistrationSchema,
+  LegacyExpoPushNotificationRegistrationSchema,
+]);
+
+export const PushNotificationSettingsResponseSchema = z.object({
+  platform: PushNotificationPlatformSchema.optional(),
+  preferences: PushNotificationPreferencesSchema,
+  provider: PushNotificationProviderSchema.optional(),
   registered: z.boolean(),
 });
 
@@ -779,6 +814,8 @@ export type RuntimePreferencesByWorkspacePath = z.infer<
 >;
 export type RuntimePreferencesResponse = z.infer<typeof RuntimePreferencesResponseSchema>;
 export type PushNotificationIntent = z.infer<typeof PushNotificationIntentSchema>;
+export type PushNotificationProvider = z.infer<typeof PushNotificationProviderSchema>;
+export type PushNotificationPlatform = z.infer<typeof PushNotificationPlatformSchema>;
 export type PushNotificationPreferences = z.infer<typeof PushNotificationPreferencesSchema>;
 export type RegisterPushNotificationRequest = z.infer<typeof RegisterPushNotificationRequestSchema>;
 export type PushNotificationSettingsResponse = z.infer<
@@ -1561,23 +1598,66 @@ export function createOpenApiDocument() {
             turnTerminal: { type: "boolean" },
           },
         },
+        PushNotificationProvider: {
+          type: "string",
+          enum: ["expo", "hms"],
+        },
+        PushNotificationPlatform: {
+          type: "string",
+          enum: ["android", "ios", "harmony"],
+        },
         RegisterPushNotificationRequest: {
-          type: "object",
-          required: ["expoPushToken", "platform", "preferences"],
-          properties: {
-            expoPushToken: {
-              type: "string",
-              pattern: "^(?:Expo|Exponent)PushToken\\[[^\\]\\r\\n]{1,512}\\]$",
+          oneOf: [
+            {
+              type: "object",
+              required: ["provider", "token", "platform", "preferences"],
+              properties: {
+                provider: { type: "string", const: "expo" },
+                token: {
+                  type: "string",
+                  pattern: "^(?:Expo|Exponent)PushToken\\[[^\\]\\r\\n]{1,512}\\]$",
+                },
+                platform: { type: "string", enum: ["android", "ios"] },
+                preferences: { $ref: "#/components/schemas/PushNotificationPreferences" },
+              },
             },
-            platform: { type: "string", enum: ["android", "ios"] },
-            preferences: { $ref: "#/components/schemas/PushNotificationPreferences" },
-          },
+            {
+              type: "object",
+              required: ["provider", "token", "platform", "preferences"],
+              properties: {
+                provider: { type: "string", const: "hms" },
+                token: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: 4096,
+                  pattern: "^[^\\s\\r\\n]+$",
+                },
+                platform: { type: "string", const: "harmony" },
+                preferences: { $ref: "#/components/schemas/PushNotificationPreferences" },
+              },
+            },
+            {
+              type: "object",
+              required: ["expoPushToken", "platform", "preferences"],
+              properties: {
+                expoPushToken: {
+                  type: "string",
+                  pattern: "^(?:Expo|Exponent)PushToken\\[[^\\]\\r\\n]{1,512}\\]$",
+                },
+                platform: { type: "string", enum: ["android", "ios"] },
+                preferences: { $ref: "#/components/schemas/PushNotificationPreferences" },
+              },
+              deprecated: true,
+            },
+          ],
         },
         PushNotificationSettingsResponse: {
           type: "object",
           required: ["preferences", "registered"],
           properties: {
+            platform: { $ref: "#/components/schemas/PushNotificationPlatform" },
             preferences: { $ref: "#/components/schemas/PushNotificationPreferences" },
+            provider: { $ref: "#/components/schemas/PushNotificationProvider" },
             registered: { type: "boolean" },
           },
         },

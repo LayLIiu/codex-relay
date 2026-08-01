@@ -60,8 +60,9 @@ describe("pairing session store", () => {
     await sessions.upsertPushNotificationSubscription({
       actionRequired: true,
       clientSessionId: "phone-session",
-      expoPushToken: "ExponentPushToken[phone-token]",
       platform: "ios",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       turnTerminal: true,
     });
 
@@ -73,8 +74,9 @@ describe("pairing session store", () => {
     expect(await sessions.getPushNotificationSubscription("phone-session")).toEqual({
       actionRequired: true,
       clientSessionId: "phone-session",
-      expoPushToken: "ExponentPushToken[phone-token]",
       platform: "ios",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       turnTerminal: true,
     });
     expect(await sessions.listActivePushNotificationSubscriptions(Date.now())).toEqual([
@@ -91,8 +93,9 @@ describe("pairing session store", () => {
     await sessions.upsertPushNotificationSubscription({
       actionRequired: true,
       clientSessionId: "expired-phone",
-      expoPushToken: "ExponentPushToken[expired-phone]",
       platform: "android",
+      provider: "expo",
+      token: "ExponentPushToken[expired-phone]",
       turnTerminal: true,
     });
 
@@ -107,8 +110,9 @@ describe("pairing session store", () => {
     await sessions.upsertPushNotificationSubscription({
       actionRequired: false,
       clientSessionId: "active-phone",
-      expoPushToken: "ExponentPushToken[active-phone]",
       platform: "android",
+      provider: "expo",
+      token: "ExponentPushToken[active-phone]",
       turnTerminal: true,
     });
     await sessions.clearAll();
@@ -209,6 +213,59 @@ describe("pairing session store", () => {
         ]),
       );
       expect(pendingColumns).toContain("client_session_id");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("migrates legacy Expo-only push subscriptions to provider-neutral columns", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-relay-legacy-push-"));
+    const path = join(directory, "auth.db");
+    const expiresAt = Date.UTC(2099, 0, 1);
+    createLegacyAuthDatabase(path, expiresAt);
+    const legacyDatabase = new DatabaseSync(path);
+    legacyDatabase.exec(`
+      CREATE TABLE push_notification_subscriptions (
+        client_session_id TEXT PRIMARY KEY,
+        expo_push_token TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        turn_terminal_enabled INTEGER NOT NULL,
+        action_required_enabled INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO push_notification_subscriptions VALUES (
+        'legacy-session',
+        'ExponentPushToken[legacy-phone]',
+        'ios',
+        1,
+        0,
+        1,
+        1
+      );
+    `);
+    legacyDatabase.close();
+
+    try {
+      const sessions = await createTursoPairingSessionStore(path);
+
+      expect(await sessions.getPushNotificationSubscription("legacy-session")).toEqual({
+        actionRequired: false,
+        clientSessionId: "legacy-session",
+        platform: "ios",
+        provider: "expo",
+        token: "ExponentPushToken[legacy-phone]",
+        turnTerminal: true,
+      });
+      const database = new DatabaseSync(path, { readOnly: true });
+      const columns = database
+        .prepare("PRAGMA table_info(push_notification_subscriptions)")
+        .all()
+        .map((column) => column.name);
+      database.close();
+      expect(columns).toContain("provider");
+      expect(columns).toContain("push_token");
+      expect(columns).not.toContain("expo_push_token");
     } finally {
       await rm(directory, { force: true, recursive: true });
     }

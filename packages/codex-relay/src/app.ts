@@ -147,6 +147,7 @@ import {
   type PushNotificationDispatcher,
   type PushNotificationEvent,
   type PushNotificationSender,
+  type PushNotificationSenders,
 } from "./push-notifications.js";
 import {
   createMemoryRuntimePreferencesStore,
@@ -188,6 +189,7 @@ type AppOptions = {
   codex?: CodexClient;
   pairing?: PairingOptions;
   preferences?: RuntimePreferencesStore;
+  hmsPushNotificationSender?: PushNotificationSender;
   pushNotificationSender?: PushNotificationSender;
   tailscaleServeForPreviewUrl?: (input: {
     readonly url: string;
@@ -351,9 +353,13 @@ export function createApp(options: AppOptions = {}) {
     });
     return result;
   }
+  const pushNotificationSenders: PushNotificationSenders = {
+    expo: options.pushNotificationSender ?? createExpoPushNotificationSender(),
+    ...(options.hmsPushNotificationSender ? { hms: options.hmsPushNotificationSender } : {}),
+  };
   const pushNotificationDispatcher = options.pairing
     ? createPushNotificationDispatcher({
-        sender: options.pushNotificationSender ?? createExpoPushNotificationSender(),
+        senders: pushNotificationSenders,
         sessions: options.pairing.sessions,
       })
     : undefined;
@@ -735,6 +741,12 @@ export function createApp(options: AppOptions = {}) {
     const subscription =
       await options.pairing!.sessions.getPushNotificationSubscription(clientSessionId);
     const response = PushNotificationSettingsResponseSchema.parse({
+      ...(subscription
+        ? {
+            platform: subscription.platform,
+            provider: subscription.provider,
+          }
+        : {}),
       preferences: subscription
         ? {
             actionRequired: subscription.actionRequired,
@@ -788,16 +800,31 @@ export function createApp(options: AppOptions = {}) {
         401,
       );
     }
+    if (!pushNotificationSenders[parsed.data.provider]) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError(
+          "push_provider_unconfigured",
+          `Push provider ${parsed.data.provider} is not configured on this relay.`,
+        ),
+        503,
+      );
+    }
 
     await options.pairing.sessions.upsertPushNotificationSubscription({
       actionRequired: parsed.data.preferences.actionRequired,
       clientSessionId,
-      expoPushToken: parsed.data.expoPushToken,
       platform: parsed.data.platform,
+      provider: parsed.data.provider,
+      token: parsed.data.token,
       turnTerminal: parsed.data.preferences.turnTerminal,
     });
     const response = PushNotificationSettingsResponseSchema.parse({
+      platform: parsed.data.platform,
       preferences: parsed.data.preferences,
+      provider: parsed.data.provider,
       registered: true,
     });
     return secureJson(c, options.pairing, secureSessionsByTokenHash, response);

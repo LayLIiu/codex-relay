@@ -146,6 +146,8 @@ The relay listens on `0.0.0.0:8787` by default. Configure it with environment va
 | `CODEX_RELAY_APPROVAL_SECRET`          | Secret used by the local approve command. Usually generated automatically.                                                                                      |
 | `CODEX_RELAY_DANGEROUSLY_AUTO_APPROVE` | Set to `1` to auto-approve mobile pairing requests. Prefer the CLI flag for local use.                                                                          |
 | `CODEX_RELAY_APP_SERVER_MODE`          | Set to `socket` to require shared mode or `stdio` to require private mode. Unset prefers shared mode with startup fallback on macOS and private mode elsewhere. |
+| `CODEX_RELAY_HMS_SERVICE_ACCOUNT_PATH` | Path to a Huawei Push Kit service-account JSON file used for Harmony push delivery.                                                                             |
+| `CODEX_RELAY_HMS_SERVICE_ACCOUNT_JSON` | Inline Huawei Push Kit service-account JSON. Use only when a protected secret store cannot mount a file.                                                       |
 | `CODEX_HOME`                           | Codex home directory, used when reading Codex session metadata.                                                                                                 |
 | `CODEX_BIN`                            | Codex CLI executable path.                                                                                                                                      |
 
@@ -158,6 +160,37 @@ PORT=8788 npx codex-relay@latest
 ```sh
 CODEX_RELAY_WORKSPACE_PATH=/path/to/project npx codex-relay@latest
 ```
+
+### Harmony Push Kit
+
+Harmony push registration uses provider `hms`, platform `harmony`, and the native HMS device token. HMS tokens are stored separately from Expo tokens and are never rewritten as Expo tokens.
+
+Download a Push Kit service-account credential from the Huawei project that owns the Harmony application. The JSON document must contain:
+
+```json
+{
+  "project_id": "your-project-id",
+  "key_id": "your-key-id",
+  "sub_account": "service-account@example.com",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+}
+```
+
+Configure exactly one source:
+
+```sh
+CODEX_RELAY_HMS_SERVICE_ACCOUNT_PATH=/secure/path/hms-service-account.json \
+  npx codex-relay@latest
+```
+
+or:
+
+```sh
+CODEX_RELAY_HMS_SERVICE_ACCOUNT_JSON='{"project_id":"...","key_id":"...","sub_account":"...","private_key":"..."}' \
+  npx codex-relay@latest
+```
+
+The relay validates the JSON and private key during startup. If HMS credentials are not configured, Expo delivery remains available but Harmony registration returns `503 push_provider_unconfigured`. Do not commit the service-account JSON or private key to the repository.
 
 ## Network Notes
 

@@ -1229,14 +1229,17 @@ describe("Codex Relay server routes", () => {
 
     expect(registration.status).toBe(200);
     await expect(registration.json()).resolves.toEqual({
+      platform: "ios",
       preferences: { actionRequired: true, turnTerminal: false },
+      provider: "expo",
       registered: true,
     });
     expect(await sessions.getPushNotificationSubscription("phone-session")).toEqual({
       actionRequired: true,
       clientSessionId: "phone-session",
-      expoPushToken: "ExponentPushToken[phone-token]",
       platform: "ios",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       turnTerminal: false,
     });
 
@@ -1244,7 +1247,9 @@ describe("Codex Relay server routes", () => {
       headers: { authorization: "Bearer client-token" },
     });
     await expect(settings.json()).resolves.toEqual({
+      platform: "ios",
       preferences: { actionRequired: true, turnTerminal: false },
+      provider: "expo",
       registered: true,
     });
 
@@ -1260,6 +1265,67 @@ describe("Codex Relay server routes", () => {
     expect(await sessions.getPushNotificationSubscription("phone-session")).toBeUndefined();
   });
 
+  it("requires an HMS sender before accepting a Harmony push token", async () => {
+    const sessions = await createTursoPairingSessionStore(":memory:");
+    await sessions.createSession("client-token", {
+      clientSessionId: "harmony-session",
+      expiresAt: Date.now() + 60_000,
+    });
+    const request = {
+      method: "PUT",
+      body: JSON.stringify({
+        platform: "harmony",
+        preferences: { actionRequired: true, turnTerminal: true },
+        provider: "hms",
+        token: "hms-device-token",
+      }),
+      headers: {
+        authorization: "Bearer client-token",
+        "content-type": "application/json",
+      },
+    };
+    const pairing = {
+      createClientToken: () => "unused-client-token",
+      hashClientToken: (token: string) => token,
+      sessions,
+      tokenTtlMs: 60_000,
+    };
+
+    const unconfigured = await createApp({
+      codex: createMockCodex(),
+      pairing,
+    }).request("/v1/notifications/push", request);
+    expect(unconfigured.status).toBe(503);
+    expect(await sessions.getPushNotificationSubscription("harmony-session")).toBeUndefined();
+
+    const hmsSender: PushNotificationSender = {
+      async send() {
+        return { invalidTokens: [] };
+      },
+    };
+    const registration = await createApp({
+      codex: createMockCodex(),
+      hmsPushNotificationSender: hmsSender,
+      pairing,
+    }).request("/v1/notifications/push", request);
+
+    expect(registration.status).toBe(200);
+    await expect(registration.json()).resolves.toEqual({
+      platform: "harmony",
+      preferences: { actionRequired: true, turnTerminal: true },
+      provider: "hms",
+      registered: true,
+    });
+    expect(await sessions.getPushNotificationSubscription("harmony-session")).toEqual({
+      actionRequired: true,
+      clientSessionId: "harmony-session",
+      platform: "harmony",
+      provider: "hms",
+      token: "hms-device-token",
+      turnTerminal: true,
+    });
+  });
+
   it("observes app-server terminal turns and action requests without handling the request", async () => {
     const sessions = await createTursoPairingSessionStore(":memory:");
     await sessions.createSession("client-token", {
@@ -1269,8 +1335,9 @@ describe("Codex Relay server routes", () => {
     await sessions.upsertPushNotificationSubscription({
       actionRequired: true,
       clientSessionId: "phone-session",
-      expoPushToken: "ExponentPushToken[phone-token]",
       platform: "ios",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       turnTerminal: true,
     });
     const notificationHandlers = new Set<(notification: unknown) => void>();
@@ -1289,7 +1356,7 @@ describe("Codex Relay server routes", () => {
     const sender: PushNotificationSender = {
       async send(notifications) {
         sent.push([...notifications]);
-        return { invalidExpoPushTokens: [] };
+        return { invalidTokens: [] };
       },
     };
     createApp({

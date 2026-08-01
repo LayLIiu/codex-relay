@@ -107,8 +107,9 @@ describe("subagent thread boundaries", () => {
     await sessions.upsertPushNotificationSubscription({
       actionRequired: true,
       clientSessionId: "phone-session",
-      expoPushToken: "ExponentPushToken[phone-token]",
       platform: "ios",
+      provider: "expo",
+      token: "ExponentPushToken[phone-token]",
       turnTerminal: true,
     });
     const notificationHandlers = new Set<(notification: AppServerNotification) => void>();
@@ -126,7 +127,7 @@ describe("subagent thread boundaries", () => {
     const sender: PushNotificationSender = {
       async send(notifications) {
         sent.push([...notifications]);
-        return { invalidExpoPushTokens: [] };
+        return { invalidTokens: [] };
       },
     };
     createApp({
