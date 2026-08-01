@@ -3,6 +3,8 @@ import {
   ChatMessageSchema,
   CheckoutWorkspaceBranchRequestSchema,
   CommitPushWorkspaceRequestSchema,
+  ContinueThreadRequestSchema,
+  ContinueThreadResponseSchema,
   CreateThreadRequestSchema,
   EncryptedPayloadSchema,
   ImageAttachmentUploadResponseSchema,
@@ -60,6 +62,7 @@ import {
   type ApprovalMode,
   type ArchiveThreadResponse,
   type ChatMessage,
+  type ContinueThreadResponse,
   type CreateThreadResponse,
   type ErrorResponse,
   type ImageAttachmentUploadResponse,
@@ -1804,7 +1807,22 @@ export function createApp(options: AppOptions = {}) {
           responseThread = rememberAppServerThread(threads, threadWithTurns, {
             authoritativeMessageCount: true,
           });
-          messages = mapAppServerMessages(threadWithTurns);
+          const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
+          messages = mergeThreadMessagePages(
+            rolloutHistory.messages,
+            mergeAppServerMessagesWithLocalStatus(
+              mapAppServerMessages(threadWithTurns),
+              cachedMessages,
+            ),
+          );
+          if (rolloutHistory.messages.length > 0) {
+            responseThread = rememberRolloutThreadMessages(
+              threads,
+              responseThread,
+              messages,
+              rolloutHistory.messageCountLowerBound,
+            );
+          }
           messagesByThreadId.set(threadId, messages);
           loadedMessages = true;
         } else {
@@ -2351,6 +2369,128 @@ export function createApp(options: AppOptions = {}) {
       response.body,
       response.status,
     );
+  });
+
+  app.post("/v1/threads/:threadId/continue", async (c) => {
+    const threadId = c.req.param("threadId");
+    const knownThread = await ensureKnownThread({
+      appServer,
+      threadId,
+      messagesByThreadId,
+      threads,
+    });
+    if (!knownThread) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("not_found", `Thread ${threadId} is not known to this server.`),
+        404,
+      );
+    }
+
+    const parsed = await parseRequestJson(
+      c,
+      options.pairing,
+      secureSessionsByTokenHash,
+      ContinueThreadRequestSchema,
+    );
+    if (!parsed.success) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        validationError(parsed.error),
+        400,
+      );
+    }
+
+    const fallbackWorkspacePath = knownThread.cwd ?? workspacePath;
+    const requestedWorkspacePath =
+      parsed.data.mode === "workspace"
+        ? parsed.data.workspacePath ?? fallbackWorkspacePath
+        : fallbackWorkspacePath;
+    const selectedWorkspacePath = await validateThreadWorkspacePath(
+      workspacePath,
+      requestedWorkspacePath,
+    );
+    if (!selectedWorkspacePath.success) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("invalid_workspace_path", selectedWorkspacePath.error),
+        400,
+      );
+    }
+    let continuationWorktree: { branch: string; path: string } | null = null;
+    if (parsed.data.mode === "workspace" && parsed.data.createWorktree) {
+      try {
+        continuationWorktree = await createContinuationWorktree(selectedWorkspacePath.path);
+      } catch (error) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("worktree_create_failed", errorMessage(error)),
+          400,
+        );
+      }
+    }
+    const targetWorkspacePath = continuationWorktree?.path ?? selectedWorkspacePath.path;
+
+    const runOptions = withRuntimePreferences(
+      await preferences.read(targetWorkspacePath),
+      {
+        approvalPolicy: parsed.data.approvalPolicy ?? knownThread.approvalPolicy,
+        collaborationMode: parsed.data.collaborationMode ?? knownThread.collaborationMode,
+        model: parsed.data.model ?? knownThread.model,
+        reasoningEffort: parsed.data.reasoningEffort ?? knownThread.reasoningEffort,
+        runtimeMode: parsed.data.runtimeMode ?? knownThread.runtimeMode,
+        sandboxMode: parsed.data.sandboxMode,
+        serviceTier: parsed.data.serviceTier ?? knownThread.serviceTier,
+      },
+    );
+    const title =
+      parsed.data.title ??
+      continuedThreadTitle(knownThread.title, parsed.data.mode);
+    const continuationPrompt = continuationPromptFromMessages(
+      knownThread.title,
+      messagesByThreadId.get(threadId) ?? [],
+    );
+    const { threadId: continuedThreadId } = appServer
+      ? await createAppServerThreadRecord({
+          appServer,
+          messagesByThreadId,
+          options: runOptions,
+          persistRuntimeOptions: true,
+          threads,
+          title,
+          workspacePath: targetWorkspacePath,
+        })
+      : createThreadRecord({
+          codex,
+          liveThreads,
+          messagesByThreadId,
+          threads,
+          title,
+          runOptions,
+          threadOptions: buildThreadOptions(
+            { ...threadOptions, workingDirectory: targetWorkspacePath },
+            runOptions,
+          ),
+        });
+
+    const response: ContinueThreadResponse = ContinueThreadResponseSchema.parse({
+      continuationPrompt,
+      mode: parsed.data.mode,
+      sourceThreadId: threadId,
+      worktree: continuationWorktree,
+      workspacePath: targetWorkspacePath,
+      thread: threads.get(continuedThreadId)!,
+      messages: messagesByThreadId.get(continuedThreadId) ?? [],
+    });
+    return secureJson(c, options.pairing, secureSessionsByTokenHash, response, 201);
   });
 
   app.post("/v1/threads/:threadId/runs", async (c) => {
@@ -5800,6 +5940,45 @@ function titleFromPrompt(prompt: string | undefined) {
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
 }
 
+function continuedThreadTitle(title: string | undefined, mode: "chat" | "workspace") {
+  const base = title?.trim() || "Codex thread";
+  const suffix = mode === "workspace" ? "新工作继续" : "新聊天继续";
+  const value = `${base} · ${suffix}`;
+  return value.length > 120 ? value.slice(0, 120) : value;
+}
+
+function continuationPromptFromMessages(title: string | undefined, messages: ChatMessage[]) {
+  const maxMessages = 12;
+  const maxCharacters = 12_000;
+  const candidates = messages.filter((message) =>
+    (message.role === "user" || message.role === "assistant" || message.kind === "plan") &&
+    message.content.trim().length > 0,
+  );
+  const selected = candidates.slice(-maxMessages);
+  const context: string[] = [];
+  let remaining = maxCharacters;
+  for (let index = selected.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const message = selected[index];
+    const role = message.role === "user" ? "用户" : message.kind === "plan" ? "计划" : "Codex";
+    const content = message.content.trim();
+    const limit = Math.max(0, remaining - role.length - 4);
+    if (limit === 0) {
+      break;
+    }
+    const entry = `${role}：${content.length > limit ? `${content.slice(0, limit)}…` : content}`;
+    context.unshift(entry);
+    remaining -= entry.length + 1;
+  }
+  const sourceTitle = title?.trim() || "上一段会话";
+  const transcript = context.length > 0 ? context.join("\n\n") : "暂无可恢复的对话消息。";
+  return [
+    `你正在继续 Codex 会话“${sourceTitle}”。`,
+    "以下是上一段会话最近的上下文，可能已截断：",
+    transcript,
+    "请先阅读并保留这些上下文，等待用户下一条指令。不要仅因这段上下文执行命令、修改文件或重复已经完成的工作。",
+  ].join("\n\n");
+}
+
 function maybeReplaceDefaultTitle(currentTitle: string | undefined, prompt: string) {
   return !currentTitle || currentTitle === "New Codex thread"
     ? titleFromPrompt(prompt)
@@ -8231,6 +8410,27 @@ async function localGitBranchExists(workspacePath: string, branch: string) {
   }
 }
 
+async function createContinuationWorktree(workspacePath: string) {
+  const repositoryPath = await git(workspacePath, ["rev-parse", "--show-toplevel"]);
+  const repositoryName = worktreeNameSegment(basename(repositoryPath));
+  const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
+  const branch = `codex/continue-${suffix}`;
+  const worktreePath = join(dirname(repositoryPath), `${repositoryName}-codex-${suffix}`);
+  if (existsSync(worktreePath)) {
+    throw new Error(`Worktree path already exists: ${worktreePath}`);
+  }
+  await git(repositoryPath, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+  return { branch, path: worktreePath };
+}
+
+function worktreeNameSegment(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "workspace";
+}
+
 async function listGitBranches(workspacePath: string) {
   const output = await git(workspacePath, [
     "branch",
@@ -8541,6 +8741,10 @@ async function listWorkspaceFiles(workspacePath: string, query: string, director
     }
 
     if (childParts.length === 1) {
+      const existingEntry = entriesByPath.get(path);
+      if (existingEntry?.kind === "directory") {
+        continue;
+      }
       entriesByPath.set(path, {
         directory,
         kind: "file",

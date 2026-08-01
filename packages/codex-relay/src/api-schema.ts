@@ -612,6 +612,28 @@ export const CreateThreadResponseSchema = z.object({
   result: z.string().optional(),
 });
 
+export const ContinueThreadRequestSchema = z
+  .object({
+    createWorktree: z.boolean().default(false),
+    mode: z.enum(["chat", "workspace"]).default("chat"),
+    title: z.string().trim().min(1).max(120).optional(),
+    workspacePath: z.string().trim().min(1).optional(),
+  })
+  .merge(ThreadRunOptionsSchema.partial());
+
+export const ContinueThreadWorktreeSchema = z.object({
+  branch: z.string().trim().min(1),
+  path: z.string().trim().min(1),
+});
+
+export const ContinueThreadResponseSchema = CreateThreadResponseSchema.extend({
+  continuationPrompt: z.string().trim().min(1),
+  mode: z.enum(["chat", "workspace"]),
+  sourceThreadId: z.string().trim().min(1),
+  worktree: ContinueThreadWorktreeSchema.nullable().default(null),
+  workspacePath: z.string().trim().min(1),
+});
+
 export const RunThreadRequestSchema = z
   .object({
     prompt: z.string().trim().min(1),
@@ -867,6 +889,9 @@ export type PairEncryptedPayload = z.infer<typeof PairEncryptedPayloadSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type CreateThreadRequest = z.infer<typeof CreateThreadRequestSchema>;
 export type CreateThreadResponse = z.infer<typeof CreateThreadResponseSchema>;
+export type ContinueThreadRequest = z.infer<typeof ContinueThreadRequestSchema>;
+export type ContinueThreadResponse = z.infer<typeof ContinueThreadResponseSchema>;
+export type ContinueThreadWorktree = z.infer<typeof ContinueThreadWorktreeSchema>;
 export type RunThreadRequest = z.infer<typeof RunThreadRequestSchema>;
 export type StreamThreadRunRequest = z.infer<typeof StreamThreadRunRequestSchema>;
 export type RunThreadResponse = z.infer<typeof RunThreadResponseSchema>;
@@ -1129,6 +1154,7 @@ export const apiPaths = {
   threads: "/v1/threads",
   thread: (threadId: string) => `/v1/threads/${encodeURIComponent(threadId)}`,
   threadArchive: (threadId: string) => `/v1/threads/${encodeURIComponent(threadId)}`,
+  threadContinue: (threadId: string) => `/v1/threads/${encodeURIComponent(threadId)}/continue`,
   threadContextWindow: (threadId: string) =>
     `/v1/threads/${encodeURIComponent(threadId)}/context-window`,
   threadGoal: (threadId: string) => `/v1/threads/${encodeURIComponent(threadId)}/goal`,
@@ -1256,6 +1282,25 @@ export function createOpenApiDocument() {
             "200": jsonResponse("ArchiveThreadResponse"),
             "404": jsonResponse("ErrorResponse"),
             "502": jsonResponse("ErrorResponse"),
+          },
+        },
+      },
+      "/v1/threads/{threadId}/continue": {
+        post: {
+          summary: "Continue a Codex thread in a new chat or workspace",
+          parameters: [
+            {
+              name: "threadId",
+              in: "path",
+              required: true,
+              schema: { type: "string" },
+            },
+          ],
+          requestBody: jsonRequest("ContinueThreadRequest"),
+          responses: {
+            "201": jsonResponse("ContinueThreadResponse"),
+            "400": jsonResponse("ErrorResponse"),
+            "404": jsonResponse("ErrorResponse"),
           },
         },
       },
@@ -1800,6 +1845,38 @@ export function createOpenApiDocument() {
             thread: { $ref: "#/components/schemas/ThreadSummary" },
             messages: { type: "array", items: { $ref: "#/components/schemas/ChatMessage" } },
             result: { type: "string" },
+          },
+        },
+        ContinueThreadRequest: {
+          type: "object",
+          properties: {
+            createWorktree: { type: "boolean", default: false },
+            mode: { type: "string", enum: ["chat", "workspace"], default: "chat" },
+            title: { type: "string", maxLength: 120 },
+            workspacePath: { type: "string" },
+            collaborationMode: { type: "string", enum: ["default", "plan"], default: "default" },
+          },
+        },
+        ContinueThreadResponse: {
+          type: "object",
+          required: ["continuationPrompt", "thread", "mode", "sourceThreadId", "workspacePath"],
+          properties: {
+            continuationPrompt: { type: "string" },
+            thread: { $ref: "#/components/schemas/ThreadSummary" },
+            messages: { type: "array", items: { $ref: "#/components/schemas/ChatMessage" } },
+            result: { type: "string" },
+            mode: { type: "string", enum: ["chat", "workspace"] },
+            sourceThreadId: { type: "string" },
+            worktree: {
+              nullable: true,
+              type: "object",
+              required: ["branch", "path"],
+              properties: {
+                branch: { type: "string" },
+                path: { type: "string" },
+              },
+            },
+            workspacePath: { type: "string" },
           },
         },
         RunThreadRequest: {

@@ -1765,6 +1765,7 @@ describe("Codex Relay server routes", () => {
     await mkdir(appPath);
     const startOptions: Parameters<CodexClient["startThread"]>[0][] = [];
     const app = createApp({
+      appServer: null,
       codex: createMockCodex({ onStartThread: (options) => startOptions.push(options) }),
       workspacePath,
     });
@@ -1779,6 +1780,81 @@ describe("Codex Relay server routes", () => {
     expect(response.status).toBe(201);
     expect(startOptions[0]).toMatchObject({ workingDirectory: appPath });
     expect(body.thread).toMatchObject({ cwd: appPath });
+  });
+
+  it("continues a thread in a new chat using the source workspace", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const startOptions: Parameters<CodexClient["startThread"]>[0][] = [];
+    const app = createApp({
+      appServer: null,
+      codex: createMockCodex({ onStartThread: (options) => startOptions.push(options) }),
+      workspacePath,
+    });
+
+    const createResponse = await app.request("/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({ title: "Original" }),
+      headers: { "content-type": "application/json" },
+    });
+    const createBody = await createResponse.json();
+    const continueResponse = await app.request(`/v1/threads/${createBody.thread.id}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "chat" }),
+      headers: { "content-type": "application/json" },
+    });
+    const continueBody = await continueResponse.json();
+
+    expect(continueResponse.status).toBe(201);
+    expect(startOptions).toHaveLength(2);
+    expect(startOptions[1]).toMatchObject({ workingDirectory: workspacePath });
+    expect(continueBody).toMatchObject({
+      mode: "chat",
+      sourceThreadId: createBody.thread.id,
+      workspacePath,
+      thread: {
+        cwd: workspacePath,
+        title: "Original · 新聊天继续",
+      },
+    });
+    expect(continueBody.continuationPrompt).toContain("你正在继续 Codex 会话“Original”。");
+  });
+
+  it("continues a thread in a new Git worktree", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-worktree-source-"));
+    await git(workspacePath, ["init", "-b", "main"]);
+    await git(workspacePath, ["config", "user.email", "test@example.com"]);
+    await git(workspacePath, ["config", "user.name", "Codex Relay Test"]);
+    await writeFile(join(workspacePath, "README.md"), "# Worktree\n");
+    await git(workspacePath, ["add", "README.md"]);
+    await git(workspacePath, ["commit", "-m", "initial"]);
+    const app = createApp({
+      appServer: null,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    const createResponse = await app.request("/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({ title: "Original", workspacePath }),
+      headers: { "content-type": "application/json" },
+    });
+    const createBody = await createResponse.json();
+    const continueResponse = await app.request(`/v1/threads/${createBody.thread.id}/continue`, {
+      method: "POST",
+      body: JSON.stringify({ createWorktree: true, mode: "workspace" }),
+      headers: { "content-type": "application/json" },
+    });
+    const continueBody = await continueResponse.json();
+
+    expect(continueResponse.status).toBe(201);
+    const worktreePath = continueBody.worktree.path;
+    expect(continueBody.worktree.branch).toMatch(/^codex\/continue-[a-f0-9]{8}$/);
+    expect(worktreePath).toContain("-codex-");
+    expect(continueBody.workspacePath).toBe(worktreePath);
+    expect(continueBody.thread).toMatchObject({ cwd: worktreePath });
+    await expect(readFile(join(worktreePath, "README.md"), "utf8")).resolves.toBe(
+      "# Worktree\n",
+    );
   });
 
   it("archives in-memory threads", async () => {
@@ -3290,6 +3366,46 @@ describe("Codex Relay server routes", () => {
         path: "apps/mobile/package.json",
       }),
     ]);
+  });
+
+  it("keeps nested git repositories classified as directories", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const nestedWorkspacePath = join(workspacePath, "apps", "hm_codex");
+    await git(workspacePath, ["init", "-b", "main"]);
+    await mkdir(nestedWorkspacePath, { recursive: true });
+    await git(nestedWorkspacePath, ["init", "-b", "main"]);
+    await git(nestedWorkspacePath, ["config", "user.email", "test@example.com"]);
+    await git(nestedWorkspacePath, ["config", "user.name", "Codex Relay Test"]);
+    await writeFile(join(nestedWorkspacePath, "README.md"), "# HarmonyOS\n");
+    await git(nestedWorkspacePath, ["add", "README.md"]);
+    await git(nestedWorkspacePath, ["commit", "-m", "initial"]);
+    await git(workspacePath, ["add", "apps/hm_codex"]);
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request(
+      `/v1/workspace/files?directory=${encodeURIComponent("apps")}`,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          directory: "apps",
+          kind: "directory",
+          name: "hm_codex",
+          path: "apps/hm_codex",
+        }),
+      ]),
+    );
+    expect(body.files).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "file",
+          path: "apps/hm_codex",
+        }),
+      ]),
+    );
   });
 
   it("hides paths matched by root gitignore from workspace file browsing", async () => {
@@ -6353,6 +6469,114 @@ describe("Codex Relay server routes", () => {
       expect(body).not.toHaveProperty("hasMoreMessages");
       expect(body).not.toHaveProperty("olderMessagesCursor");
       expect(body.thread.messageCount).toBe(2);
+    } finally {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  });
+
+  it("merges rollout tool history into forced app-server thread refreshes", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const codexHome = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
+    const sessionsDir = join(codexHome, "sessions", "2026", "05", "02");
+    await mkdir(sessionsDir, { recursive: true });
+    const threadId = "app-thread-refresh-rollout-tools";
+    await writeFile(
+      join(sessionsDir, `rollout-2026-05-02T00-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          payload: { message: "check tools", type: "user_message" },
+          timestamp: "2026-05-02T00:00:00.000Z",
+          type: "event_msg",
+        }),
+        JSON.stringify({
+          payload: {
+            aggregated_output: "hello\n",
+            call_id: "call_exec",
+            command: "echo hello",
+            cwd: workspacePath,
+            exit_code: 0,
+            type: "exec_command_end",
+          },
+          timestamp: "2026-05-02T00:00:01.000Z",
+          type: "event_msg",
+        }),
+        JSON.stringify({
+          payload: { message: "done", type: "agent_message" },
+          timestamp: "2026-05-02T00:00:02.000Z",
+          type: "event_msg",
+        }),
+      ].join("\n"),
+    );
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const now = Date.now() / 1000;
+    const appThread = {
+      id: threadId,
+      createdAt: now,
+      cwd: workspacePath,
+      modelProvider: "gpt-5.5",
+      name: "Refresh rollout tools",
+      preview: "Refresh rollout tools",
+      source: "app",
+      status: { type: "idle" },
+      updatedAt: now,
+      turns: [
+        {
+          id: "turn-1",
+          completedAt: now + 1,
+          items: [
+            {
+              content: [{ text: "check tools", text_elements: [], type: "text" }],
+              id: "turn-1-user",
+              type: "userMessage",
+            },
+            { id: "turn-1-assistant", text: "done", type: "agentMessage" },
+          ],
+          startedAt: now,
+          status: { type: "completed" },
+        },
+      ],
+    };
+    const readThread = vi.fn<
+      (_threadId: string, options?: { includeTurns?: boolean }) => Promise<unknown>
+    >(async (_threadId, options) =>
+      options?.includeTurns === false ? { ...appThread, turns: undefined } : appThread,
+    );
+    const appServer = {
+      listThreads: vi.fn<() => Promise<unknown[]>>(async () => [appThread]),
+      onNotification() {
+        return () => undefined;
+      },
+      onRequest() {
+        return () => undefined;
+      },
+      readThread,
+    };
+    const app = createApp({
+      appServer: appServer as never,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    try {
+      const response = await app.request(`/v1/threads/${threadId}?refresh=true`);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.messages.some((message: { kind: string }) => message.kind === "commandExecution"))
+        .toBe(true);
+      expect(
+        body.messages.find((message: { kind: string }) => message.kind === "commandExecution"),
+      ).toMatchObject({
+        content: "echo hello",
+        details: {
+          command: "echo hello",
+          exitCode: 0,
+          output: "hello\n",
+        },
+        kind: "commandExecution",
+        role: "tool",
+      });
     } finally {
       process.env.CODEX_HOME = previousCodexHome;
     }
