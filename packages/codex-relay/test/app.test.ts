@@ -4298,6 +4298,18 @@ describe("Codex Relay server routes", () => {
       sandboxMode: "danger-full-access",
     });
 
+    interruptTurn.mockRejectedValueOnce(new Error("no active turn to interrupt"));
+    const alreadyCompletedResponse = await app.request(
+      "/v1/threads/app-thread-interrupt/runs/interrupt",
+      { method: "POST" },
+    );
+    const alreadyCompletedBody = await alreadyCompletedResponse.json();
+    expect(alreadyCompletedResponse.status).toBe(200);
+    expect(alreadyCompletedBody.thread).toMatchObject({
+      id: "app-thread-interrupt",
+      state: "completed",
+    });
+
     for (const handler of notificationHandlers) {
       handler({
         method: "turn/cancelled",

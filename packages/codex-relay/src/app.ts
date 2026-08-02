@@ -2798,6 +2798,26 @@ export function createApp(options: AppOptions = {}) {
     try {
       await appServer.interruptTurn({ threadId, turnId });
     } catch (error) {
+      if (isNoActiveTurnInterruptError(error)) {
+        relayDebugLog("thread.interrupt.already_completed", {
+          threadId,
+          turnId,
+        });
+        activeAppServerTurnIdsByThreadId.delete(threadId);
+        queuedInputsByThreadId.delete(threadId);
+        steeringThreads.delete(threadId);
+        const thread = updateThread(threads, messagesByThreadId, threadId, {
+          state: "completed",
+          lastError: undefined,
+        });
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          InterruptThreadRunResponseSchema.parse({ thread }),
+          200,
+        );
+      }
       relayDebugLog("thread.interrupt.failed", {
         error: errorMessage(error),
         threadId,
@@ -2937,6 +2957,7 @@ export function createApp(options: AppOptions = {}) {
             signal: attachmentAbortController.signal,
             threadId,
             threads,
+            workspacePath: knownThread.cwd ?? workspacePath,
           }).finally(() => {
             streamSettled = true;
             relayDebugLog("thread.stream.finished", { mode: "attach", threadId });
@@ -3007,6 +3028,10 @@ export function createApp(options: AppOptions = {}) {
   });
 
   return app;
+}
+
+function isNoActiveTurnInterruptError(error: unknown) {
+  return errorMessage(error).toLowerCase().includes("no active turn");
 }
 
 function parseBearerToken(value: string | undefined) {
@@ -3662,6 +3687,7 @@ async function streamRunningAppServerThread(input: {
   signal: AbortSignal;
   threadId: string;
   threads: Map<string, ThreadMetadata>;
+  workspacePath: string;
 }) {
   let activeTurnId: string | undefined;
   let assistantMessageId: string | undefined;
@@ -3672,6 +3698,9 @@ async function streamRunningAppServerThread(input: {
   let cleanupNotificationHandler = (): void => undefined;
   let cleanupRequestHandler = (): void => undefined;
   let handlersCleaned = false;
+  let finishStream = (_error?: unknown) => {};
+  let historyPollTimer: ReturnType<typeof setInterval> | undefined;
+  let historyPollInFlight = false;
 
   const cleanupHandlers = () => {
     if (handlersCleaned) {
@@ -3680,6 +3709,94 @@ async function streamRunningAppServerThread(input: {
     handlersCleaned = true;
     cleanupRequestHandler();
     cleanupNotificationHandler();
+  };
+  const stopHistoryPolling = () => {
+    if (historyPollTimer) {
+      clearInterval(historyPollTimer);
+      historyPollTimer = undefined;
+    }
+  };
+  const syncHistorySnapshot = async () => {
+    if (historyPollInFlight || input.signal.aborted) {
+      return;
+    }
+    historyPollInFlight = true;
+    try {
+      const previousMessages = input.messagesByThreadId.get(input.threadId) ?? [];
+      let nextThread: ThreadMetadata | undefined;
+      let incomingMessages: ChatMessage[] = [];
+      try {
+        const threadWithTurns = await input.appServer.readThread(input.threadId, {
+          includeTurns: true,
+        });
+        nextThread = rememberAppServerThread(input.threads, threadWithTurns, {
+          authoritativeMessageCount: true,
+        });
+        incomingMessages = mapAppServerMessages(threadWithTurns);
+      } catch (appServerError) {
+        const rolloutHistory = readRolloutThreadMessages(input.threadId, input.workspacePath);
+        if (rolloutHistory.messages.length === 0) {
+          throw appServerError;
+        }
+        const knownThread = input.threads.get(input.threadId);
+        if (!knownThread) {
+          return;
+        }
+        nextThread = rememberRolloutThreadMessages(
+          input.threads,
+          knownThread,
+          rolloutHistory.messages,
+          rolloutHistory.messageCountLowerBound,
+        );
+        incomingMessages = resolveThreadHistoryMessages(
+          rolloutHistory.messages,
+          previousMessages,
+        );
+      }
+      if (input.signal.aborted || !nextThread) {
+        return;
+      }
+      const previousById = new Map(previousMessages.map((message) => [message.id, message]));
+      const mergedMessages = mergeAppServerMessagesWithLocalStatus(
+        incomingMessages,
+        previousMessages,
+      );
+      input.messagesByThreadId.set(input.threadId, mergedMessages);
+      threadSummary = nextThread;
+      for (const message of mergedMessages) {
+        const previous = previousById.get(message.id);
+        if (
+          previous &&
+          previous.content === message.content &&
+          previous.kind === message.kind &&
+          previous.state === message.state &&
+          previous.turnId === message.turnId
+        ) {
+          continue;
+        }
+        sendSse(input.controller, input.encoder, input.secureSession, {
+          type: message.role === "assistant" && message.state === "completed"
+            ? "thread.message.completed"
+            : "thread.message.created",
+          thread: threadSummary,
+          message,
+        });
+      }
+      if (threadSummary.state !== "running" && incomingMessages.length > 0) {
+        sendSse(input.controller, input.encoder, input.secureSession, {
+          type: "thread.state.changed",
+          thread: threadSummary,
+        });
+        finishStream();
+      }
+    } catch (error) {
+      relayDebugLog("thread.stream.attach_history_poll_failed", {
+        error: errorMessage(error),
+        threadId: input.threadId,
+      });
+    } finally {
+      historyPollInFlight = false;
+    }
   };
 
   cleanupRequestHandler = input.appServer.onRequest((request) => {
@@ -3762,6 +3879,7 @@ async function streamRunningAppServerThread(input: {
         reject(error);
       }
     };
+    finishStream = finish;
     cleanupNotificationHandler = input.appServer.onNotification((notification) => {
       const params = recordParams(notification);
       const notificationThreadId = firstString(params, ["threadId"]);
@@ -3999,14 +4117,43 @@ async function streamRunningAppServerThread(input: {
   });
 
   try {
-    const appServerThread = await Promise.race([
-      input.appServer.readThread(input.threadId, { includeTurns: false }),
-      aborted.then(() => undefined),
-    ]);
-    if (!appServerThread || input.signal.aborted) {
+    let appServerThread: AppServerThread | undefined;
+    try {
+      appServerThread = await Promise.race([
+        input.appServer.readThread(input.threadId, { includeTurns: false }),
+        aborted.then(() => undefined),
+      ]);
+    } catch (error) {
+      relayDebugLog("thread.stream.attach_read_failed", {
+        error: errorMessage(error),
+        threadId: input.threadId,
+      });
+    }
+    if (input.signal.aborted) {
       return;
     }
-    threadSummary = rememberAppServerThread(input.threads, appServerThread);
+    if (appServerThread) {
+      threadSummary = rememberAppServerThread(input.threads, appServerThread);
+    } else {
+      const rolloutHistory = readRolloutThreadMessages(input.threadId, input.workspacePath);
+      const knownThread = input.threads.get(input.threadId);
+      if (rolloutHistory.messages.length === 0 || !knownThread) {
+        return;
+      }
+      threadSummary = rememberRolloutThreadMessages(
+        input.threads,
+        knownThread,
+        rolloutHistory.messages,
+        rolloutHistory.messageCountLowerBound,
+      );
+      input.messagesByThreadId.set(
+        input.threadId,
+        resolveThreadHistoryMessages(
+          rolloutHistory.messages,
+          input.messagesByThreadId.get(input.threadId) ?? [],
+        ),
+      );
+    }
     sendSse(input.controller, input.encoder, input.secureSession, {
       type: "thread.state.changed",
       thread: threadSummary,
@@ -4014,6 +4161,9 @@ async function streamRunningAppServerThread(input: {
     if (threadSummary.state !== "running") {
       return;
     }
+    historyPollTimer = setInterval(() => {
+      void syncHistorySnapshot();
+    }, 1500);
     await Promise.race([completed, aborted]);
   } catch (error) {
     if (input.signal.aborted) {
@@ -4029,6 +4179,7 @@ async function streamRunningAppServerThread(input: {
       error: apiError("codex_run_failed", threadSummary.lastError ?? "Codex run failed.").error,
     });
   } finally {
+    stopHistoryPolling();
     removeAbortListener();
     cleanupHandlers();
   }
