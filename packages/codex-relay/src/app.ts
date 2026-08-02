@@ -6504,7 +6504,14 @@ function resolveThreadHistoryMessages(
 }
 
 function hasCompleteRolloutTranscript(messages: ChatMessage[]) {
-  return messages.some((message) => message.role === "user" || message.role === "assistant");
+  let hasUser = false;
+  let hasAssistant = false;
+  for (const message of messages) {
+    if (message.role === "user") hasUser = true;
+    if (message.role === "assistant") hasAssistant = true;
+    if (hasUser && hasAssistant) return true;
+  }
+  return false;
 }
 
 function canonicalRolloutTranscript(messages: ChatMessage[]) {
