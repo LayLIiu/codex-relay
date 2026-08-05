@@ -46,6 +46,8 @@ import {
   WorkspaceFileContentResponseSchema,
   WorkspaceChangesResponseSchema,
   WorkspaceGitActionResponseSchema,
+  WorkspaceGitLogEntrySchema,
+  WorkspaceGitLogResponseSchema,
   WorkspaceTerminalInputRequestSchema,
   WorkspaceTerminalOutputResponseSchema,
   WorkspaceTerminalResizeRequestSchema,
@@ -1026,27 +1028,53 @@ export function createApp(options: AppOptions = {}) {
         );
       }
 
-      await git(selectedWorkspacePath.path, ["add", "--all"]);
-      const commitOutput = await git(selectedWorkspacePath.path, [
-        "commit",
-        "-m",
-        parsed.data.message,
-      ]);
-      const branch = await currentGitBranch(selectedWorkspacePath.path);
-      const upstream = await git(selectedWorkspacePath.path, [
-        "rev-parse",
-        "--abbrev-ref",
-        "@{upstream}",
-      ]).catch(() => null);
-      const pushOutput = upstream
-        ? await git(selectedWorkspacePath.path, ["push"])
-        : branch
-          ? await git(selectedWorkspacePath.path, ["push", "-u", "origin", branch])
-          : await git(selectedWorkspacePath.path, ["push"]);
+      const action = parsed.data.action ?? "commit-push";
+      const message = (parsed.data.message ?? "").trim();
+      if ((action === "commit" || action === "commit-push") && message.length === 0) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("invalid_workspace_message", "提交信息不能为空"),
+          400,
+        );
+      }
+
+      const outputs: string[] = [];
+      if (action === "commit" || action === "commit-push") {
+        await git(selectedWorkspacePath.path, ["add", "--all"]);
+        const commitOutput = await git(selectedWorkspacePath.path, [
+          "commit",
+          "-m",
+          message,
+        ]);
+        outputs.push(commitOutput);
+      }
+
+      let branch = "";
+      if (action === "push" || action === "commit-push") {
+        branch = await currentGitBranch(selectedWorkspacePath.path);
+        const upstream = await git(selectedWorkspacePath.path, [
+          "rev-parse",
+          "--abbrev-ref",
+          "@{upstream}",
+        ]).catch(() => null);
+        const pushOutput = upstream
+          ? await git(selectedWorkspacePath.path, ["push"])
+          : branch
+            ? await git(selectedWorkspacePath.path, ["push", "-u", "origin", branch])
+            : await git(selectedWorkspacePath.path, ["push"]);
+        outputs.push(pushOutput);
+      }
+
       const response: WorkspaceGitActionResponse = WorkspaceGitActionResponseSchema.parse({
         branch,
-        message: "Committed and pushed workspace changes.",
-        output: [commitOutput, pushOutput].filter(Boolean).join("\n"),
+        message: action === "commit"
+          ? "Committed workspace changes."
+          : action === "push"
+            ? "Pushed workspace changes."
+            : "Committed and pushed workspace changes.",
+        output: outputs.filter(Boolean).join("\n"),
       });
       return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
     } catch (error) {
@@ -1055,6 +1083,66 @@ export function createApp(options: AppOptions = {}) {
         options.pairing,
         secureSessionsByTokenHash,
         apiError("workspace_commit_push_failed", errorMessage(error)),
+        400,
+      );
+    }
+  });
+
+  app.get(apiPaths.workspaceLog, async (c) => {
+    try {
+      const selectedWorkspacePath = await validateThreadWorkspacePath(
+        workspacePath,
+        c.req.query("workspacePath"),
+      );
+      if (!selectedWorkspacePath.success) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("invalid_workspace_path", selectedWorkspacePath.error),
+          400,
+        );
+      }
+      const branch = await currentGitBranch(selectedWorkspacePath.path).catch(() => "");
+      const logOutput = await git(selectedWorkspacePath.path, [
+        "log",
+        "--pretty=format:%h|%an|%ae|%ad|%s",
+        "--date=format:%Y-%m-%d %H:%M",
+        "-n",
+        "50",
+      ]).catch(() => "");
+      const commits = logOutput
+        .split("\n")
+        .filter((line: string) => line.trim().length > 0)
+        .map((line: string) => {
+          const parts = line.split("|");
+          const [hash, author, email, date] = parts;
+          const message = parts.slice(4).join("|");
+          return WorkspaceGitLogEntrySchema.parse({
+            hash,
+            shortHash: hash,
+            author: author ?? "",
+            email: email ?? "",
+            date: date ?? "",
+            message,
+          });
+        });
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        WorkspaceGitLogResponseSchema.parse({
+          workspacePath: selectedWorkspacePath.path,
+          branch,
+          commits,
+        }),
+      );
+    } catch (error) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("workspace_log_failed", errorMessage(error)),
         400,
       );
     }

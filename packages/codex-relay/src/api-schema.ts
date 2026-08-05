@@ -437,13 +437,29 @@ export const CheckoutWorkspaceBranchRequestSchema = WorkspaceSelectionRequestSch
 });
 
 export const CommitPushWorkspaceRequestSchema = WorkspaceSelectionRequestSchema.extend({
-  message: z.string().trim().min(1).max(240),
+  message: z.string().trim().max(240).optional(),
+  action: z.enum(["commit", "push", "commit-push"]).default("commit-push"),
 });
 
 export const WorkspaceGitActionResponseSchema = z.object({
   branch: z.string().nullable(),
   message: z.string().min(1),
   output: z.string().default(""),
+});
+
+export const WorkspaceGitLogEntrySchema = z.object({
+  hash: z.string(),
+  shortHash: z.string(),
+  author: z.string(),
+  email: z.string().optional(),
+  date: z.string(),
+  message: z.string(),
+});
+
+export const WorkspaceGitLogResponseSchema = z.object({
+  workspacePath: z.string(),
+  branch: z.string().nullable(),
+  commits: z.array(WorkspaceGitLogEntrySchema).default([]),
 });
 
 export const WORKSPACE_PREVIEW_TAB_VALUES = ["git", "files", "markdown", "web", "ssh"] as const;
@@ -867,6 +883,8 @@ export type WorkspaceSelectionRequest = z.infer<typeof WorkspaceSelectionRequest
 export type CheckoutWorkspaceBranchRequest = z.infer<typeof CheckoutWorkspaceBranchRequestSchema>;
 export type CommitPushWorkspaceRequest = z.infer<typeof CommitPushWorkspaceRequestSchema>;
 export type WorkspaceGitActionResponse = z.infer<typeof WorkspaceGitActionResponseSchema>;
+export type WorkspaceGitLogEntry = z.infer<typeof WorkspaceGitLogEntrySchema>;
+export type WorkspaceGitLogResponse = z.infer<typeof WorkspaceGitLogResponseSchema>;
 export type WorkspacePreviewTab = z.infer<typeof WorkspacePreviewTabSchema>;
 export type WorkspaceMarkdownPreviewTarget = z.infer<typeof WorkspaceMarkdownPreviewTargetSchema>;
 export type WorkspacePreviewNavigationRequest = z.infer<
@@ -1136,6 +1154,7 @@ export const apiPaths = {
   workspaceChanges: "/v1/workspace/changes",
   workspaceCheckout: "/v1/workspace/checkout",
   workspaceCommitPush: "/v1/workspace/commit-push",
+  workspaceLog: "/v1/workspace/log",
   workspaceTerminalSessions: "/v1/workspace/terminal/sessions",
   workspaceTerminalSession: (sessionId: string) =>
     `/v1/workspace/terminal/sessions/${encodeURIComponent(sessionId)}`,
