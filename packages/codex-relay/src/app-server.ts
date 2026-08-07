@@ -108,6 +108,11 @@ export type AppServerThreadItem =
       steps?: unknown;
       text?: unknown;
     }
+  | {
+      type: "todoList" | "todo_list";
+      id: string;
+      items?: Array<{ text?: string; completed?: boolean } | string>;
+    }
   | { type: "reasoning"; id: string; summary?: string[]; content?: string[] }
   | {
       type: "commandExecution";

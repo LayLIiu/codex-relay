@@ -290,6 +290,7 @@ export const ListWorkspaceFilesResponseSchema = z.object({
 export const WorkspaceFileContentResponseSchema = z.object({
   binary: z.boolean(),
   content: z.string(),
+  dataUrl: z.string().optional(),
   directory: z.string(),
   language: z.string(),
   name: z.string().min(1),
@@ -297,6 +298,11 @@ export const WorkspaceFileContentResponseSchema = z.object({
   size: z.number().int().nonnegative(),
   truncated: z.boolean(),
   workspacePath: z.string().min(1),
+});
+
+export const WorkspaceThumbnailResponseSchema = z.object({
+  dataUrl: z.string().optional(),
+  path: z.string().min(1),
 });
 
 export const UpdateWorkspaceFileContentRequestSchema = z.object({
@@ -1150,6 +1156,7 @@ export const apiPaths = {
   skills: "/v1/skills",
   workspaceFiles: "/v1/workspace/files",
   workspaceFileContent: "/v1/workspace/file",
+  workspaceThumbnail: "/v1/workspace/thumbnail",
   workspaceDirectories: "/v1/workspace-directories",
   workspaceChanges: "/v1/workspace/changes",
   workspaceCheckout: "/v1/workspace/checkout",

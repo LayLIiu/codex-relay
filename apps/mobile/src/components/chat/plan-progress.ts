@@ -173,7 +173,9 @@ function planProgressStepsFromUnknown(
     }
 
     const text = stringRecordValue(item, "step") ?? stringRecordValue(item, "text");
-    const status = normalizeStepStatus(stringRecordValue(item, "status"));
+    const status =
+      normalizeStepStatus(stringRecordValue(item, "status")) ??
+      booleanRecordValue(item, "completed");
     if (!text || !status) {
       return [];
     }
@@ -189,11 +191,41 @@ function planProgressStepsFromContent(
     .replace(/\r\n/g, "\n")
     .split("\n")
     .flatMap((line) => {
+      const checklistMatch = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.+?)\s*$/i);
+      if (checklistMatch?.[1] && checklistMatch?.[2]) {
+        return [
+          {
+            status: normalizeStepStatus(checklistMatch[1].toLowerCase() === "x" ? "completed" : "pending")!,
+            text: checklistMatch[2],
+          },
+        ];
+      }
+      const itemMatch = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$/i);
+      if (itemMatch?.[1]) {
+        return [{ status: "pending", text: itemMatch[1] }];
+      }
       const match = line.match(/^\s*(completed|inProgress|in_progress|pending)\s*:\s*(.+?)\s*$/i);
       const status = normalizeStepStatus(match?.[1]);
       const text = match?.[2]?.trim();
       return status && text ? [{ status, text }] : [];
     });
+}
+
+function booleanRecordValue(
+  value: unknown,
+  key: string,
+): TimelinePlanProgressStepStatus | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (entryKey === key && typeof entryValue === "boolean") {
+      return entryValue ? "completed" : "pending";
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeStepStatus(

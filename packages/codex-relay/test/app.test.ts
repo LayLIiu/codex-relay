@@ -1025,6 +1025,27 @@ describe("Codex Relay server routes", () => {
     expect(body.files[0].patch).toContain("diff --git a/README.md b/README.md");
   }, 15_000);
 
+  it("returns empty workspace changes for a non-git directory", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    await writeFile(join(workspacePath, "notes.txt"), "not a git repo\n");
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request("/v1/workspace/changes");
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      workspacePath,
+      branches: [],
+      currentBranch: null,
+      diff: "",
+      files: [],
+      hasChanges: false,
+      status: "",
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+    });
+  });
+
   it("returns git status and diff for a selected thread workspace", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     const threadWorkspacePath = join(workspacePath, "apps", "mobile");
@@ -3510,6 +3531,77 @@ describe("Codex Relay server routes", () => {
     expect(body.size).toBeGreaterThan(0);
   });
 
+  it("returns a base64 data URL for image workspace files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    // 超过文本预览 256KB 上限的大图，验证返回完整 dataUrl 而非被截断
+    const pngBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+      Buffer.alloc(300 * 1024, 0xab),
+    ]);
+    await writeFile(join(workspacePath, "preview.png"), pngBytes);
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request(
+      `/v1/workspace/file?path=${encodeURIComponent("preview.png")}`,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.binary).toBe(true);
+    expect(body.content).toBe("");
+    expect(body.truncated).toBe(false);
+    expect(body.dataUrl).toBe(`data:image/png;base64,${pngBytes.toString("base64")}`);
+  });
+
+  it("returns a thumbnail data URL for image workspace files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    // 1x1 有效 PNG，验证 sips 缩略图生成
+    const pngBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    await writeFile(join(workspacePath, "preview.png"), pngBytes);
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request(
+      `/v1/workspace/thumbnail?path=${encodeURIComponent("preview.png")}`,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.path).toBe("preview.png");
+    expect(body.dataUrl).toMatch(/^data:image\/(jpeg|png);base64,/);
+  });
+
+  it("omits thumbnail dataUrl for non-image workspace files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    await writeFile(join(workspacePath, "notes.txt"), "hello\n");
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request(
+      `/v1/workspace/thumbnail?path=${encodeURIComponent("notes.txt")}`,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.dataUrl).toBeUndefined();
+  });
+
+  it("omits dataUrl for non-image binary workspace files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    await writeFile(join(workspacePath, "payload.bin"), Buffer.from([0x00, 0x01, 0x02, 0xff]));
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    const response = await app.request(
+      `/v1/workspace/file?path=${encodeURIComponent("payload.bin")}`,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.binary).toBe(true);
+    expect(body.dataUrl).toBeUndefined();
+  });
+
   it("updates workspace file content for mobile editing", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     await mkdir(join(workspacePath, "docs"), { recursive: true });
@@ -3659,6 +3751,94 @@ describe("Codex Relay server routes", () => {
     expect(body).toContain('"kind":"plan"');
     expect(body).toContain("Inspect README.md");
     expect(body).toContain("Update the title line");
+  });
+
+  it("streams app-server todo list items as plan steps", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const notificationHandlers = new Set<(notification: unknown) => void>();
+    const startTurn = vi.fn<() => Promise<unknown>>(async () => {
+      queueMicrotask(() => {
+        for (const handler of notificationHandlers) {
+          handler({
+            method: "item/started",
+            params: {
+              item: {
+                id: "todo-1",
+                items: [
+                  { text: "Inspect README.md", completed: false },
+                  { text: "Update the title line", completed: true },
+                ],
+                type: "todo_list",
+              },
+              threadId: "app-thread-todo-list",
+              turnId: "turn-todo-list",
+            },
+          });
+          handler({
+            method: "turn/completed",
+            params: {
+              status: "completed",
+              threadId: "app-thread-todo-list",
+              turnId: "turn-todo-list",
+            },
+          });
+        }
+      });
+      return {
+        completedAt: null,
+        id: "turn-todo-list",
+        items: [],
+        startedAt: null,
+        status: "completed",
+      };
+    });
+    const now = Date.now() / 1000;
+    const appServer = {
+      onNotification(handler: (notification: unknown) => void) {
+        notificationHandlers.add(handler);
+        return () => notificationHandlers.delete(handler);
+      },
+      onRequest() {
+        return () => undefined;
+      },
+      startThread: vi.fn<() => Promise<unknown>>(async () => ({
+        id: "app-thread-todo-list",
+        createdAt: now,
+        cwd: workspacePath,
+        modelProvider: "gpt-5.5",
+        name: "Todo list",
+        preview: "Todo list",
+        source: "app",
+        status: "idle",
+        turns: [],
+        updatedAt: now,
+      })),
+      startTurn,
+    };
+    const app = createApp({
+      appServer: appServer as never,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    await app.request("/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({ title: "Todo list" }),
+      headers: { "content-type": "application/json" },
+    });
+    const response = await app.request("/v1/threads/app-thread-todo-list/runs/stream", {
+      method: "POST",
+      body: JSON.stringify({ collaborationMode: "plan", prompt: "Update README title" }),
+      headers: { "content-type": "application/json" },
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain('"kind":"plan"');
+    expect(body).toContain("Inspect README.md");
+    expect(body).toContain("Update the title line");
+    expect(body).toContain('"status":"pending"');
+    expect(body).toContain('"status":"completed"');
   });
 
   it("does not treat plain app-server agent messages as implementable plans", async () => {
@@ -3820,6 +4000,13 @@ describe("Codex Relay server routes", () => {
       id: "assistant-proposed-plan",
       kind: "plan",
       content: expect.stringContaining("# README Title Update"),
+      details: {
+        steps: [
+          { status: "pending", text: "Inspect README.md." },
+          { status: "pending", text: "Replace the first heading." },
+          { status: "pending", text: "Run checks." },
+        ],
+      },
     });
     expect(body.messages[0].content).not.toContain("<proposed_plan>");
   });

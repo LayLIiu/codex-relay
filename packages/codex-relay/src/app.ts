@@ -44,6 +44,7 @@ import {
   UpdateRuntimePreferencesRequestSchema,
   VersionResponseSchema,
   WorkspaceFileContentResponseSchema,
+  WorkspaceThumbnailResponseSchema,
   WorkspaceChangesResponseSchema,
   WorkspaceGitActionResponseSchema,
   WorkspaceGitLogEntrySchema,
@@ -112,9 +113,9 @@ import { cors } from "hono/cors";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -177,6 +178,7 @@ const defaultCodexModel = "gpt-5.5";
 const execFileAsync = promisify(execFile);
 const IMAGE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
 const WORKSPACE_FILE_PREVIEW_MAX_BYTES = 256 * 1024;
+const WORKSPACE_IMAGE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
 const LOCAL_MARKDOWN_IMAGE_PATTERN = /!\[([^\]]*)\]\(([^)]*)\)/g;
 const LOCAL_IMAGE_REFERENCE_PATTERN = /\.(gif|heic|heif|jpe?g|png|webp)$/i;
 const imageAttachmentDirectory = codexRelayDataPath("attachments/images");
@@ -1053,7 +1055,7 @@ export function createApp(options: AppOptions = {}) {
 
       let branch = "";
       if (action === "push" || action === "commit-push") {
-        branch = await currentGitBranch(selectedWorkspacePath.path);
+        branch = (await currentGitBranch(selectedWorkspacePath.path)) ?? "";
         const upstream = await git(selectedWorkspacePath.path, [
           "rev-parse",
           "--abbrev-ref",
@@ -1582,6 +1584,50 @@ export function createApp(options: AppOptions = {}) {
         secureSessionsByTokenHash,
         apiError("workspace_file_unavailable", errorMessage(error)),
         502,
+      );
+    }
+  });
+
+  app.get(apiPaths.workspaceThumbnail, async (c) => {
+    try {
+      const selectedWorkspacePath = await validateThreadWorkspacePath(
+        workspacePath,
+        c.req.query("workspacePath"),
+      );
+      if (!selectedWorkspacePath.success) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("invalid_workspace_path", selectedWorkspacePath.error),
+          400,
+        );
+      }
+
+      const requestedPath = c.req.query("path")?.trim();
+      if (!requestedPath) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("missing_workspace_file_path", "Workspace file path is required."),
+          400,
+        );
+      }
+
+      const dataUrl = await readWorkspaceFileThumbnail(selectedWorkspacePath.path, requestedPath);
+      const response = WorkspaceThumbnailResponseSchema.parse({
+        dataUrl,
+        path: requestedPath,
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    } catch (error) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("workspace_thumbnail_unavailable", errorMessage(error)),
+        400,
       );
     }
   });
@@ -3539,6 +3585,27 @@ async function runPromptStreamed(input: {
         throw new Error(text ?? "Codex run failed.");
       }
 
+      const item = eventItem(event);
+      if (item?.type === "todo_list" || item?.type === "todoList") {
+        const structured = structuredStreamMessage("status", event, "Plan updated");
+        const statusMessage = appendMessage(input.messagesByThreadId, activeThreadId, {
+          role: "status",
+          kind: structured.kind,
+          content: structured.content,
+          details: structured.details,
+          state: "completed",
+        });
+        threadSummary = updateThread(input.threads, input.messagesByThreadId, activeThreadId, {
+          state: "running",
+        });
+        sendSse(input.controller, input.encoder, input.secureSession, {
+          type: "thread.message.created",
+          thread: threadSummary,
+          message: statusMessage,
+        });
+        continue;
+      }
+
       if (!text) {
         continue;
       }
@@ -4017,6 +4084,7 @@ async function streamRunningAppServerThread(input: {
             activeTurnId = firstString(params, ["turnId"]) ?? turnIdFromParams(params);
             return;
           case "item/started":
+          case "item/updated":
           case "item/completed": {
             observedTurnActivity = true;
             const item = params?.item;
@@ -4648,6 +4716,7 @@ async function runAppServerPromptStreamed(input: {
             }
             return;
           case "item/started":
+          case "item/updated":
           case "item/completed": {
             const item = params?.item;
             if (!item || typeof item !== "object") {
@@ -5728,9 +5797,15 @@ function imageMimeType(path: string) {
   switch (extname(path).toLowerCase()) {
     case ".gif":
       return "image/gif";
+    case ".heic":
+      return "image/heic";
+    case ".heif":
+      return "image/heif";
     case ".jpg":
     case ".jpeg":
       return "image/jpeg";
+    case ".bmp":
+      return "image/bmp";
     case ".webp":
       return "image/webp";
     case ".png":
@@ -7063,6 +7138,22 @@ function rolloutRecordMessage(
     });
   }
 
+  if (
+    (record.type === "event_msg" || record.type === "response_item") &&
+    (payload.type === "todo_list" || payload.type === "todoList")
+  ) {
+    return ChatMessageSchema.parse({
+      id: `${messageKey}:todo`,
+      threadId,
+      role: "status",
+      kind: "plan",
+      content: planContentFromRecord(payload) ?? "Plan updated",
+      details: planDetailsFromRecord(payload),
+      createdAt: timestamp,
+      state: "completed",
+    });
+  }
+
   if (record.type === "event_msg" && payload.type === "patch_apply_end") {
     const changes = rolloutPatchApplyChanges(payload.changes, workspacePath);
     if (changes.length === 0) {
@@ -7378,12 +7469,16 @@ function isRolloutMessageLine(line: string) {
         line.includes('"type":"patch_apply_end"') ||
         line.includes('"type":"task_complete"') ||
         line.includes('"type":"exec_command_end"') ||
-        line.includes('"type":"mcp_tool_call_end"'))) ||
+        line.includes('"type":"mcp_tool_call_end"') ||
+        line.includes('"type":"todo_list"') ||
+        line.includes('"type":"todoList"'))) ||
     (line.includes('"type":"response_item"') &&
       (line.includes('"type":"custom_tool_call"') ||
         line.includes('"type":"custom_tool_call_output"') ||
         line.includes('"type":"function_call"') ||
-        line.includes('"type":"function_call_output"')))
+        line.includes('"type":"function_call_output"') ||
+        line.includes('"type":"todo_list"') ||
+        line.includes('"type":"todoList"')))
   );
 }
 
@@ -7513,12 +7608,15 @@ function mapAppServerItem(threadId: string, turn: AppServerTurn, item: AppServer
       const agentItem = item as Extract<AppServerThreadItem, { type: "agentMessage" }>;
       const planContent = proposedPlanContent(agentItem.text);
       const messageParts = appServerAgentMessageParts(agentItem);
+      const planSteps = planContent ? planStepsFromContent(planContent) : undefined;
       return ChatMessageSchema.parse({
         ...base,
         role: "assistant",
         kind: planContent ? "plan" : undefined,
         content: planContent ?? messageParts.content,
-        details: planContent ? { raw: agentItem.text } : messageParts.details,
+        details: planContent
+          ? { raw: agentItem.text, steps: planSteps ?? undefined }
+          : messageParts.details,
       });
     }
     case "reasoning": {
@@ -7965,6 +8063,13 @@ function structuredStreamMessage(
           status: firstString(item, ["status"]),
           type,
         },
+      };
+    case "todo_list":
+    case "todoList":
+      return {
+        kind: "plan",
+        content: planContentFromRecord(item) ?? fallbackContent,
+        details: planDetailsFromRecord(item),
       };
     default:
       return {
@@ -8429,6 +8534,8 @@ function kindFromProtocolType(type: string | undefined) {
     case "plan":
     case "turn_plan_updated":
     case "turn/plan/updated":
+    case "todo_list":
+    case "todoList":
       return "plan";
     case "request_user_input":
     case "structured_user_input":
@@ -8507,6 +8614,35 @@ function proposedPlanContent(value: string) {
   return match?.[1]?.trim() || undefined;
 }
 
+function planStepsFromContent(content: string) {
+  const steps: Array<{ status: string; text: string }> = [];
+  content.replace(/\r\n/g, "\n").split("\n").forEach((line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    const checklistMatch = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.+)$/);
+    if (checklistMatch?.[1] && checklistMatch?.[2]) {
+      const text = checklistMatch[2].trim();
+      if (text) {
+        steps.push({
+          status: checklistMatch[1].toLowerCase() === "x" ? "completed" : "pending",
+          text,
+        });
+      }
+      return;
+    }
+    const itemMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+    if (itemMatch?.[1]) {
+      const text = itemMatch[1].trim();
+      if (text) {
+        steps.push({ status: "pending", text });
+      }
+    }
+  });
+  return steps.length > 0 ? steps : undefined;
+}
+
 function turnErrorMessage(params: Record<string, unknown> | undefined) {
   const message = firstString(params, ["message", "reason", "lastError"]);
   if (message) {
@@ -8573,9 +8709,41 @@ function planDetailsFromRecord(record: Record<string, unknown> | undefined) {
     type: firstString(record, ["type"]),
     explanation: planString(record, ["explanation"]),
     plan: record?.plan,
-    steps: record?.steps,
+    steps: Array.isArray(record?.steps) ? record.steps : planTodoStepsFromRecord(record),
+    items: record?.items,
     raw: record,
   };
+}
+
+function planTodoStepsFromRecord(record: Record<string, unknown> | undefined) {
+  if (!record || !Array.isArray(record.items)) {
+    return undefined;
+  }
+  const steps: Array<{ status: string; text: string }> = [];
+  record.items.forEach((item: unknown) => {
+    if (typeof item === "string") {
+      const text = meaningfulPlanText(item);
+      if (text) {
+        steps.push({ status: "pending", text });
+      }
+      return;
+    }
+    if (!item || typeof item !== "object") {
+      return;
+    }
+    const stepRecord = item as Record<string, unknown>;
+    const text =
+      planString(stepRecord, ["markdown", "content", "text", "title", "description", "summary"]) ??
+      planTextFromValue(stepRecord.step) ??
+      planTextFromValue(stepRecord.text);
+    const status =
+      firstString(stepRecord, ["status"]) ??
+      (stepRecord.completed === true ? "completed" : stepRecord.completed === false ? "pending" : undefined);
+    if (text && status) {
+      steps.push({ status, text });
+    }
+  });
+  return steps.length > 0 ? steps : undefined;
 }
 
 function planTextFromValue(value: unknown): string | undefined {
@@ -8666,6 +8834,21 @@ type WorkspaceChangeFile = {
 };
 
 async function readWorkspaceChanges(workspacePath: string) {
+  const isGitRepository = await git(workspacePath, ["rev-parse", "--is-inside-work-tree"])
+    .then((output) => output.trim() === "true")
+    .catch(() => false);
+  if (!isGitRepository) {
+    return {
+      branches: [],
+      currentBranch: null,
+      diff: "",
+      files: [],
+      hasChanges: false,
+      status: "",
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+    };
+  }
+
   const repo = await openRepository(workspacePath);
   const [currentBranch, branches] = await Promise.all([
     currentGitBranch(workspacePath),
@@ -9183,7 +9366,11 @@ async function readWorkspaceFileContent(workspacePath: string, requestedPath: st
     };
   }
 
-  const bytesToRead = Math.min(fileStat.size, WORKSPACE_FILE_PREVIEW_MAX_BYTES);
+  const isImageFile = /\.(png|jpe?g|gif|webp|heic|heif|bmp)$/i.test(relativePath.path);
+  const bytesToRead = Math.min(
+    fileStat.size,
+    isImageFile ? WORKSPACE_IMAGE_PREVIEW_MAX_BYTES : WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+  );
   const buffer = Buffer.alloc(bytesToRead);
   if (bytesToRead > 0) {
     const handle = await open(absolutePath, "r");
@@ -9196,19 +9383,65 @@ async function readWorkspaceFileContent(workspacePath: string, requestedPath: st
 
   const binary = buffer.includes(0);
   const content = binary ? "" : buffer.toString("utf8");
+  const imageDataUrl =
+    binary && isImageFile && buffer.length > 0
+      ? `data:${imageMimeType(relativePath.path)};base64,${buffer.toString("base64")}`
+      : undefined;
   return {
     content: {
       binary,
       content,
+      dataUrl: imageDataUrl,
       directory: dirname(relativePath.path) === "." ? "" : dirname(relativePath.path),
       language: languageFromWorkspaceFile(relativePath.path),
       name: basename(relativePath.path),
       path: relativePath.path,
       size: fileStat.size,
-      truncated: fileStat.size > WORKSPACE_FILE_PREVIEW_MAX_BYTES,
+      truncated: fileStat.size > bytesToRead,
     },
     success: true as const,
   };
+}
+
+async function readWorkspaceFileThumbnail(workspacePath: string, requestedPath: string) {
+  const relativePath = normalizeWorkspaceRelativePath(requestedPath);
+  if (!relativePath.success) {
+    return undefined;
+  }
+  if (!/\.(png|jpe?g|gif|webp|heic|heif|bmp)$/i.test(relativePath.path)) {
+    return undefined;
+  }
+  const rootPath = resolve(workspacePath);
+  const absolutePath = resolve(rootPath, relativePath.path);
+  if (!isPathInside(rootPath, absolutePath)) {
+    return undefined;
+  }
+  const fileStat = await stat(absolutePath).catch(() => null);
+  if (!fileStat?.isFile()) {
+    return undefined;
+  }
+
+  // 优先用 macOS sips 生成小尺寸缩略图；无 sips 或失败时回退返回完整图片
+  const thumbnailPath = join(tmpdir(), `relay-thumbnail-${randomUUID()}.jpg`);
+  try {
+    await execFileAsync("sips", [
+      "-Z",
+      "96",
+      "-s",
+      "format",
+      "jpeg",
+      absolutePath,
+      "--out",
+      thumbnailPath,
+    ]);
+    const thumbnail = await readFile(thumbnailPath);
+    return `data:image/jpeg;base64,${thumbnail.toString("base64")}`;
+  } catch {
+    const buffer = await readFile(absolutePath);
+    return `data:${imageMimeType(relativePath.path)};base64,${buffer.toString("base64")}`;
+  } finally {
+    await rm(thumbnailPath, { force: true }).catch(() => {});
+  }
 }
 
 async function updateWorkspaceFileContent(
