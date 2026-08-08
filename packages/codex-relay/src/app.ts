@@ -3577,6 +3577,8 @@ async function runPromptStreamed(input: {
       message: assistantMessage,
     });
 
+    let thinkingMessageId: string | undefined = undefined;
+
     for await (const event of streamed.events) {
       const kind = classifyStreamEvent(event);
       const text = extractStreamText(event);
@@ -3606,11 +3608,52 @@ async function runPromptStreamed(input: {
         continue;
       }
 
+      if (kind === "reasoning") {
+        const structured = structuredStreamMessage("reasoning", event, text ?? "思考中…");
+        const delta = structured.content || "思考中…";
+        if (!thinkingMessageId) {
+          const msg = appendMessage(input.messagesByThreadId, activeThreadId, {
+            role: "reasoning",
+            kind: "thinking",
+            content: delta,
+            details: structured.details,
+            state: "streaming",
+          });
+          thinkingMessageId = msg.id;
+          sendSse(input.controller, input.encoder, input.secureSession, {
+            type: "thread.message.created",
+            thread: threadSummary,
+            message: msg,
+          });
+        } else {
+          const existing = input.messagesByThreadId
+            .get(activeThreadId)?.find((m) => m.id === thinkingMessageId);
+          const offset = existing?.content.length ?? 0;
+          updateMessage(input.messagesByThreadId, activeThreadId, thinkingMessageId, {
+            content: (existing?.content ?? "") + delta,
+          });
+          sendSse(input.controller, input.encoder, input.secureSession, {
+            type: "thread.message.delta",
+            threadId: activeThreadId,
+            messageId: thinkingMessageId,
+            delta,
+            offset,
+          });
+        }
+        continue;
+      }
+
       if (!text) {
         continue;
       }
 
       if (kind === "assistant") {
+        if (thinkingMessageId) {
+          updateMessage(input.messagesByThreadId, activeThreadId, thinkingMessageId, {
+            state: "completed",
+          });
+          thinkingMessageId = undefined;
+        }
         const assistantPatch = appendMessageDelta(
           input.messagesByThreadId,
           activeThreadId,
@@ -3649,6 +3692,13 @@ async function runPromptStreamed(input: {
           message: statusMessage,
         });
       }
+    }
+
+    if (thinkingMessageId) {
+      updateMessage(input.messagesByThreadId, activeThreadId, thinkingMessageId, {
+        state: "completed",
+      });
+      thinkingMessageId = undefined;
     }
 
     assistantMessage = updateMessage(
