@@ -3961,6 +3961,14 @@ async function streamRunningAppServerThread(input: {
       if (input.signal.aborted || !nextThread) {
         return;
       }
+      // 按身份（忽略 id / turnId）统计服务端已知消息：run 模式消息 id 是
+      // msg-<uuid>、turnId 为空，app-server 读回的是另一套 id/turnId，直接按 id
+      // 比对会让 attach 首次轮询把整段历史全量重放、客户端重复显示历史。
+      const previousIdentityCounts = new Map<string, number>();
+      for (const previousMessage of previousMessages) {
+        const identityKey = attachMessageIdentityKey(previousMessage);
+        previousIdentityCounts.set(identityKey, (previousIdentityCounts.get(identityKey) ?? 0) + 1);
+      }
       const previousById = new Map(previousMessages.map((message) => [message.id, message]));
       const mergedMessages = mergeAppServerMessagesWithLocalStatus(
         incomingMessages,
@@ -3977,6 +3985,14 @@ async function streamRunningAppServerThread(input: {
           previous.state === message.state &&
           previous.turnId === message.turnId
         ) {
+          continue;
+        }
+        // 身份匹配：服务端已知的同身份消息（与 run 模式历史内容一致）视为历史，
+        // 跳过重放；真正的增量（服务端还没有的身份）照常下发。
+        const identityKey = attachMessageIdentityKey(message);
+        const remainingIdentityMatches = previousIdentityCounts.get(identityKey) ?? 0;
+        if (remainingIdentityMatches > 0) {
+          previousIdentityCounts.set(identityKey, remainingIdentityMatches - 1);
           continue;
         }
         sendSse(input.controller, input.encoder, input.secureSession, {
@@ -6665,6 +6681,18 @@ function preserveKnownRunningThreadState(thread: ThreadMetadata, wasKnownRunning
     ...thread,
     state: "running",
   });
+}
+
+/**
+ * attach 历史轮询识别"同一条消息"的身份 key。
+ * run 模式的 id 是 msg-<uuid>、turnId 为空；app-server 读回的 id/turnId 是另一套，
+ * 直接按 id 比对会让 attach 首次轮询把整段历史当新消息全量重放。
+ * 这里忽略 id 与 turnId，按 role + kind + content 判定同一条，避免历史重复下发。
+ */
+function attachMessageIdentityKey(message: ChatMessage): string {
+  const kind = message.kind ?? message.role;
+  const content = (message.content ?? "").trim();
+  return `${message.role}\n${kind}\n${content}`;
 }
 
 function mapAppServerMessages(thread: AppServerThread): ChatMessage[] {
