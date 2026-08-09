@@ -1912,8 +1912,10 @@ export function createApp(options: AppOptions = {}) {
         404,
       );
     }
+    // 已知 running：活跃 turn、本地内存或列表快照都算。preserveKnownRunningThreadState
+    // 已保证 completed/failed 不会被拉回 running，所以这里只需判断「是否可能还在跑」。
     const wasKnownRunning =
-      knownThread?.state === "running" || activeAppServerTurnIdsByThreadId.has(threadId);
+      activeAppServerTurnIdsByThreadId.has(threadId) || knownThread?.state === "running";
     if (appServer) {
       try {
         const thread = await appServer.readThread(threadId, {
@@ -1934,13 +1936,16 @@ export function createApp(options: AppOptions = {}) {
         let messages = cachedMessages;
         let responseThread = preserveKnownRunningThreadState(mappedThread, wasKnownRunning);
 
-        if (forceRefresh && responseThread.state !== "running") {
+        if (forceRefresh) {
           const threadWithTurns = await appServer.readThread(threadId, {
             includeTurns: true,
           });
           responseThread = rememberAppServerThread(threads, threadWithTurns, {
             authoritativeMessageCount: true,
           });
+          // 刷新详情时即使服务端标记线程 running，也要保留运行中状态，
+          // 避免把正在工作的会话误降级为 completed。
+          responseThread = preserveKnownRunningThreadState(responseThread, wasKnownRunning);
           const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
           messages = resolveThreadHistoryMessages(
             rolloutHistory.messages,
@@ -6674,7 +6679,11 @@ function rememberThreadGoal(
 }
 
 function preserveKnownRunningThreadState(thread: ThreadMetadata, wasKnownRunning: boolean) {
-  if (!wasKnownRunning || thread.state === "running") {
+  // completed/failed 是 app-server 的权威终态，即使本地还有残留的活跃 turn
+  // 也不能把已结束的对话拉回 running；只有 idle/unknown 才需要保留运行态，
+  // 避免 attach 轮询瞬间把正在工作的线程误降级。
+  if (!wasKnownRunning || thread.state === "running" ||
+      thread.state === "completed" || thread.state === "failed") {
     return thread;
   }
   return ThreadSummarySchema.parse({
@@ -6998,6 +7007,7 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
   const functionCalls = new Map<string, RolloutFunctionCall>();
   const handledApplyPatchCallIds = new Set<string>();
   const pendingApplyPatchChanges: RolloutPatchChange[] = [];
+  const seenThinkingTexts = new Set<string>();
   const lines = readFileSync(rolloutPath, "utf8").split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
@@ -7053,6 +7063,17 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
       );
       if (!message) {
         continue;
+      }
+      // agent_reasoning 与 reasoning 常为同一思考的两种记录，按内容去重，
+      // 避免历史回放时 thinking 卡片内容被重复拼接。
+      if (message.kind === "thinking") {
+        const thinkingKey = message.content.trim();
+        if (thinkingKey.length > 0) {
+          if (seenThinkingTexts.has(thinkingKey)) {
+            continue;
+          }
+          seenThinkingTexts.add(thinkingKey);
+        }
       }
       collected.push(message);
       const patchApplyEndCallId = rolloutPatchApplyEndCallId(record);
@@ -7181,6 +7202,39 @@ function rolloutRecordMessage(
   const payload = record.payload;
   if (!payload) {
     return undefined;
+  }
+
+  if (record.type === "event_msg" && payload.type === "agent_reasoning") {
+    const text = firstString(payload, ["text"]);
+    if (!text) {
+      return undefined;
+    }
+    return ChatMessageSchema.parse({
+      id: `${messageKey}:reasoning`,
+      threadId,
+      role: "reasoning",
+      kind: "thinking",
+      content: text,
+      details: { content: [text], summary: [] },
+      createdAt: timestamp,
+      state: "completed",
+    });
+  }
+
+  if (record.type === "response_item" && payload.type === "reasoning") {
+    const summary = rolloutReasoningTextParts(payload.summary);
+    const content = rolloutReasoningTextParts(payload.content);
+    const text = [...summary, ...content].join("\n\n").trim();
+    return ChatMessageSchema.parse({
+      id: `${messageKey}:reasoning`,
+      threadId,
+      role: "reasoning",
+      kind: "thinking",
+      content: text.length > 0 ? text : "Reasoning",
+      details: { content, summary },
+      createdAt: timestamp,
+      state: "completed",
+    });
   }
 
   if (record.type === "event_msg" && payload.type === "user_message") {
@@ -7543,6 +7597,7 @@ function isRolloutMessageLine(line: string) {
   return (
     (line.includes('"type":"event_msg"') &&
       (line.includes('"type":"user_message"') ||
+        line.includes('"type":"agent_reasoning"') ||
         line.includes('"type":"agent_message"') ||
         line.includes('"type":"patch_apply_end"') ||
         line.includes('"type":"task_complete"') ||
@@ -7551,7 +7606,8 @@ function isRolloutMessageLine(line: string) {
         line.includes('"type":"todo_list"') ||
         line.includes('"type":"todoList"'))) ||
     (line.includes('"type":"response_item"') &&
-      (line.includes('"type":"custom_tool_call"') ||
+      (line.includes('"type":"reasoning"') ||
+        line.includes('"type":"custom_tool_call"') ||
         line.includes('"type":"custom_tool_call_output"') ||
         line.includes('"type":"function_call"') ||
         line.includes('"type":"function_call_output"') ||
@@ -8017,7 +8073,7 @@ function mapAppServerTurnStatusState(status: unknown) {
   if (["failed", "systemerror", "error"].includes(statusType)) {
     return "failed";
   }
-  if (["completed", "complete", "done"].includes(statusType)) {
+  if (["completed", "complete", "done", "interrupted"].includes(statusType)) {
     return "completed";
   }
   if (["idle", "notloaded", "notstarted"].includes(statusType)) {
@@ -8884,6 +8940,29 @@ function stringArray(value: unknown) {
   }
 
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function rolloutReasoningTextParts(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const parts: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      if (item.trim().length > 0) {
+        parts.push(item.trim());
+      }
+      continue;
+    }
+    if (item && typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      const text = firstString(record, ["text", "content"]);
+      if (text) {
+        parts.push(text.trim());
+      }
+    }
+  }
+  return parts;
 }
 
 function normalizeFileChanges(value: unknown[]) {

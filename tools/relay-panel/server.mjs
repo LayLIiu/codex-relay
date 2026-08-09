@@ -197,9 +197,10 @@ async function approveCode(rawCode) {
 
 async function status() {
   await refreshStateFromDisk();
+  const busy = await isRelayPortBusy();
   return {
     relayPort: RELAY_PORT,
-    relayRunning: Boolean(relayProcess),
+    relayRunning: Boolean(relayProcess) || busy,
     pairingPayload,
     connectUrl,
     candidateUrls,

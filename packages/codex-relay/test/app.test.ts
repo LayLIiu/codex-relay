@@ -797,6 +797,213 @@ describe("Codex Relay server routes", () => {
     }
   });
 
+  it("restores thinking cards from rollout history after restart", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const homePath = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
+    const codexHome = join(homePath, ".codex");
+    const threadId = "rollout-thinking-thread";
+    const sessionDir = join(codexHome, "sessions", "2026", "07", "03");
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, `rollout-2026-07-03T02-06-46-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          timestamp: "2026-07-03T02:06:46.361Z",
+          type: "event_msg",
+          payload: { type: "agent_reasoning", text: "\n用户提到的是跨平台 UI 差异问题。" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-03T02:06:46.362Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "帮我看看标题栏" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-03T02:06:46.370Z",
+          type: "response_item",
+          payload: {
+            type: "reasoning",
+            id: "rs_test",
+            summary: [{ type: "summary_text", text: "\n用户提到的是跨平台 UI 差异问题。" }],
+            content: null,
+            encrypted_content: null,
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-test" },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-03T02:06:47.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "已定位标题栏布局问题。" },
+        }),
+      ].join("\n"),
+    );
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const app = createApp({ codex: createMockCodex(), workspacePath });
+
+    try {
+      const response = await app.request(`/v1/threads/${threadId}`);
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(body.messages.some(
+        (message: { role: string; kind: string }) =>
+          message.role === "reasoning" && message.kind === "thinking",
+      )).toBe(true);
+      const thinking = body.messages.find(
+        (message: { role: string; kind: string }) =>
+          message.role === "reasoning" && message.kind === "thinking",
+      );
+      expect(thinking.content).toContain("跨平台 UI 差异");
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("keeps completed history when refreshing a running thread", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const homePath = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
+    const codexHome = join(homePath, ".codex");
+    const threadId = "refresh-running-history-thread";
+    const now = Date.now() / 1000;
+    const appThread = {
+      id: threadId,
+      createdAt: now - 120,
+      cwd: workspacePath,
+      modelProvider: "gpt-5.5",
+      name: "Running history thread",
+      preview: "Running history thread",
+      source: "app",
+      status: { type: "running" },
+      updatedAt: now,
+      turns: [
+        {
+          id: "turn-1",
+          completedAt: now - 60,
+          items: [
+            {
+              content: [{ text: "first question", text_elements: [], type: "text" }],
+              id: "turn-1-user",
+              type: "userMessage",
+            },
+            { id: "turn-1-assistant", text: "first answer", type: "agentMessage" },
+          ],
+          startedAt: now - 120,
+          status: { type: "completed" },
+        },
+      ],
+    };
+    const readThread = vi.fn<
+      (_threadId: string, options?: { includeTurns?: boolean }) => Promise<unknown>
+    >(async (_threadId, options) =>
+      options?.includeTurns === false ? { ...appThread, turns: undefined } : appThread,
+    );
+    const appServer = {
+      listThreads: vi.fn<() => Promise<unknown[]>>(async () => [appThread]),
+      onNotification() {
+        return () => undefined;
+      },
+      onRequest() {
+        return () => undefined;
+      },
+      readThread,
+    };
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const app = createApp({
+      appServer: appServer as never,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    try {
+      const response = await app.request(`/v1/threads/${threadId}?refresh=true`);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.thread.state).toBe("running");
+      expect(
+        body.messages.some(
+          (message: { content: string; role: string }) =>
+            message.role === "user" && message.content === "first question",
+        ),
+      ).toBe(true);
+      expect(
+        body.messages.some(
+          (message: { content: string; role: string }) =>
+            message.role === "assistant" && message.content === "first answer",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("reports interrupted turns as not running in thread details", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const now = Date.now() / 1000;
+    const threadId = "interrupted-turn-thread";
+    const appThread = {
+      id: threadId,
+      createdAt: now - 120,
+      cwd: workspacePath,
+      modelProvider: "gpt-5.5",
+      name: "Interrupted turn thread",
+      preview: "Interrupted turn thread",
+      source: "app",
+      status: { type: "notLoaded" },
+      updatedAt: now,
+      turns: [
+        {
+          id: "turn-interrupted",
+          completedAt: null,
+          items: [
+            {
+              content: [{ text: "interrupted question", text_elements: [], type: "text" }],
+              id: "turn-interrupted-user",
+              type: "userMessage",
+            },
+            { id: "turn-interrupted-assistant", text: "partial answer", type: "agentMessage" },
+          ],
+          startedAt: now - 60,
+          status: { type: "interrupted" },
+        },
+      ],
+    };
+    const readThread = vi.fn<
+      (_threadId: string, options?: { includeTurns?: boolean }) => Promise<unknown>
+    >(async (_threadId, options) =>
+      options?.includeTurns === false ? { ...appThread, turns: undefined } : appThread,
+    );
+    const appServer = {
+      listThreads: vi.fn<() => Promise<unknown[]>>(async () => [appThread]),
+      onNotification() {
+        return () => undefined;
+      },
+      onRequest() {
+        return () => undefined;
+      },
+      readThread,
+    };
+    const app = createApp({
+      appServer: appServer as never,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    const response = await app.request(`/v1/threads/${threadId}`);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.thread.state).not.toBe("running");
+  });
+
   it("lists directories outside the configured workspace when a cwd points there", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     const externalPath = await mkdtemp(join(tmpdir(), "codex-relay-external-"));

@@ -610,12 +610,20 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
         if (chatStore$.activeThreadId.peek() !== threadId) {
           return response.thread.state;
         }
+        // 防御：刷新时服务端若暂时返回空消息，而本地已有历史，则不要用空快照
+        // 替换掉正在展示的旧历史（例如线程正在工作时恢复前台）。
+        const currentDetail = queryClient.getQueryData<
+          Awaited<ReturnType<typeof serverStateQueryFns.thread>>
+        >(serverStateKeys.thread(threadId));
+        const shouldReplace =
+          options.refresh &&
+          !(currentDetail && currentDetail.messages.length > 0 && response.messages.length === 0);
         setThreadDetailState(
           queryClient,
           response.thread,
           response.messages,
           response.pendingInputRequests,
-          { replaceMessages: options.refresh },
+          { replaceMessages: shouldReplace },
         );
         await Promise.all([
           fetchQueuedInputsState(queryClient, threadId).catch(() => undefined),
