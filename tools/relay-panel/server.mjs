@@ -7,10 +7,11 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 7800);
 const RELAY_PORT = Number(process.env.RELAY_PORT ?? 17878);
+const PUBLIC_URL = process.env.PUBLIC_URL ?? "http://47.102.141.228:8789";
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const PUBLIC_DIR = resolve(import.meta.dirname, "public");
 const DATA_DIR = join(homedir(), "Library", "Application Support", "codex-relay");
@@ -18,6 +19,7 @@ const DATA_DIR = join(homedir(), "Library", "Application Support", "codex-relay"
 let relayProcess = null;
 let relayLog = [];
 let pairingPayload = "";
+let publicPairingPayload = "";
 let connectUrl = "";
 let candidateUrls = [];
 
@@ -61,10 +63,16 @@ function startRelay() {
   if (relayProcess) {
     return { ok: true, alreadyRunning: true };
   }
-  const child = spawn("pnpm", ["dev"], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, PORT: String(RELAY_PORT) },
-  });
+  const relayBin = process.env.RELAY_BIN;
+  const child = relayBin
+    ? spawn(process.execPath, [relayBin], {
+        cwd: dirname(relayBin),
+        env: { ...process.env, PORT: String(RELAY_PORT) },
+      })
+    : spawn("pnpm", ["dev"], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, PORT: String(RELAY_PORT) },
+      });
   relayProcess = child;
 
   const onData = (chunk) => {
@@ -153,6 +161,7 @@ async function refreshStateFromDisk() {
   const disk = await readServerStateFromDisk();
   if (disk.pairingPayload) {
     pairingPayload = disk.pairingPayload;
+    publicPairingPayload = buildPublicPairingPayload(disk.pairingPayload);
   }
   if (disk.connectUrl) {
     connectUrl = disk.connectUrl;
@@ -160,6 +169,14 @@ async function refreshStateFromDisk() {
   if (disk.candidateUrls.length > 0) {
     candidateUrls = disk.candidateUrls;
   }
+}
+
+function buildPublicPairingPayload(payload) {
+  if (!payload) {
+    return "";
+  }
+  const encodedPublicUrl = encodeURIComponent(PUBLIC_URL);
+  return payload.replace(/serverUrl=[^&]+/, `serverUrl=${encodedPublicUrl}`);
 }
 
 async function approveCode(rawCode) {
@@ -202,6 +219,8 @@ async function status() {
     relayPort: RELAY_PORT,
     relayRunning: Boolean(relayProcess) || busy,
     pairingPayload,
+    publicPairingPayload,
+    publicUrl: PUBLIC_URL,
     connectUrl,
     candidateUrls,
     log: relayLog.slice(-120).join(""),
@@ -295,6 +314,8 @@ const server = createServer(async (req, res) => {
       await refreshStateFromDisk();
       return sendJson(res, 200, {
         pairingPayload,
+        publicPairingPayload,
+        publicUrl: PUBLIC_URL,
         connectUrl,
         candidateUrls,
       });

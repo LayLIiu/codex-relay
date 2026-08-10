@@ -102,6 +102,14 @@
       overflow: auto;
       white-space: pre-wrap;
     }
+    .lan-note {
+      width: 100%;
+      font-size: 11px;
+      color: #7a8394;
+      line-height: 1.5;
+      word-break: break-all;
+      text-align: center;
+    }
     .row { display: flex; gap: 10px; }
     .row input {
       flex: 1;
@@ -173,6 +181,7 @@
           <div class="qr-placeholder">先点击上方「启动服务」<br />二维码会在这里显示</div>
         </div>
         <div class="pair-payload" id="pairPayload">—</div>
+        <div class="lan-note" id="lanNote">局域网备选：—</div>
       </div>
     </div>
 
@@ -195,7 +204,7 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="/qrcode.min.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const badge = $("statusBadge");
@@ -216,20 +225,26 @@
     function renderQr(payload) {
       const box = $("qrBox");
       $("pairPayload").textContent = payload || "—";
+      $("lanNote").textContent = "局域网备选：—";
       if (!payload) {
         box.innerHTML = '<div class="qr-placeholder">先启动服务<br />配对码会在这里显示</div>';
         return;
       }
+      box.innerHTML = "";
       if (window.QRCode) {
-        QRCode.toDataURL(payload, { width: 220, margin: 1 }, (err, url) => {
-          if (err) {
-            box.innerHTML = '<div class="qr-placeholder">二维码生成失败，请复制下方链接</div>';
-            return;
-          }
-          box.innerHTML = '<img src="' + url + '" alt="配对二维码" />';
-        });
+        try {
+          new QRCode(box, {
+            text: payload,
+            width: 220,
+            height: 220,
+            colorDark: "#000000",
+            colorLight: "#ffffff"
+          });
+        } catch (_) {
+          box.innerHTML = '<div class="qr-placeholder">二维码生成失败，请复制下方链接</div>';
+        }
       } else {
-        box.innerHTML = '<div class="qr-placeholder">二维码库未加载（可能离线），请直接复制下方链接粘贴到 App</div>';
+        box.innerHTML = '<div class="qr-placeholder">二维码库未加载，请直接复制下方链接粘贴到 App</div>';
       }
     }
 
@@ -238,8 +253,12 @@
         const res = await fetch("/api/status");
         const data = await res.json();
         setStatus(data.relayRunning);
-        if (data.pairingPayload) {
-          renderQr(data.pairingPayload);
+        const qrPayload = data.publicPairingPayload || data.pairingPayload;
+        if (qrPayload) {
+          renderQr(qrPayload);
+          if (data.connectUrl) {
+            $("lanNote").textContent = "局域网备选：" + data.connectUrl;
+          }
         }
         if (data.log && data.log.length !== lastLogLength) {
           const box = $("logBox");
@@ -260,7 +279,8 @@
         const data = await res.json();
         showMessage("startMsg", data.message || (data.ok ? "已启动" : "失败"), !data.ok);
         setStatus(data.relayRunning);
-        if (data.pairingPayload) renderQr(data.pairingPayload);
+        const qrPayload = data.publicPairingPayload || data.pairingPayload;
+        if (qrPayload) renderQr(qrPayload);
       } catch (error) {
         showMessage("startMsg", "启动失败：" + error.message, true);
       } finally {
