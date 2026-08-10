@@ -11,7 +11,8 @@ import { dirname, extname, join, resolve } from "node:path";
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 7800);
 const RELAY_PORT = Number(process.env.RELAY_PORT ?? 17878);
-const PUBLIC_URL = process.env.PUBLIC_URL ?? "http://47.102.141.228:8789";
+// 公网地址不写死：设置 PUBLIC_URL 环境变量才会生成公网配对码（如 http://host:8789）
+const PUBLIC_URL = process.env.PUBLIC_URL ?? "";
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const PUBLIC_DIR = resolve(import.meta.dirname, "public");
 const DATA_DIR = join(homedir(), "Library", "Application Support", "codex-relay");
@@ -172,7 +173,7 @@ async function refreshStateFromDisk() {
 }
 
 function buildPublicPairingPayload(payload) {
-  if (!payload) {
+  if (!payload || !PUBLIC_URL) {
     return "";
   }
   const encodedPublicUrl = encodeURIComponent(PUBLIC_URL);
