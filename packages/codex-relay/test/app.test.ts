@@ -4713,6 +4713,111 @@ describe("Codex Relay server routes", () => {
     await streamResponse.text();
   });
 
+  it("force-ends a thread when interrupting the app-server turn fails", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const notificationHandlers: Array<
+      (notification: { method: string; params?: unknown }) => void
+    > = [];
+    const now = Date.now() / 1000;
+    const appThread = {
+      id: "app-thread-interrupt-failed",
+      preview: "Stuck thread",
+      createdAt: now,
+      updatedAt: now,
+      status: { type: "running" },
+      cwd: workspacePath,
+      source: "app-server",
+      modelProvider: "openai",
+      name: "Stuck thread",
+      turns: [
+        {
+          id: "turn-stuck",
+          items: [],
+          status: { type: "running" },
+          startedAt: now,
+          completedAt: null,
+        },
+      ],
+    };
+    const interruptTurn = vi.fn<() => Promise<void>>(async () => {
+      throw new Error("app-server unresponsive");
+    });
+    const appServer = {
+      interruptTurn,
+      listThreads: vi.fn<() => Promise<unknown[]>>(async () => [appThread]),
+      onNotification(handler: (notification: { method: string; params?: unknown }) => void) {
+        notificationHandlers.push(handler);
+        return () => undefined;
+      },
+      onRequest() {
+        return () => undefined;
+      },
+      readThread: vi.fn<() => Promise<unknown>>(async () => appThread),
+      startThread: vi.fn<() => Promise<unknown>>(async () => appThread),
+      startTurn: vi.fn<() => Promise<unknown>>(async () => ({
+        id: "turn-stuck",
+        items: [],
+        status: { type: "running" },
+        startedAt: now,
+        completedAt: null,
+      })),
+    };
+    const app = createApp({
+      appServer: appServer as never,
+      codex: createMockCodex(),
+      workspacePath,
+    });
+
+    await app.request("/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({ title: "Stuck thread" }),
+      headers: { "content-type": "application/json" },
+    });
+    const streamResponse = await app.request(
+      "/v1/threads/app-thread-interrupt-failed/runs/stream",
+      {
+        method: "POST",
+        body: JSON.stringify({ prompt: "Start long turn", runtimeMode: "full-access" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    await waitUntil(() => expect(appServer.startTurn).toHaveBeenCalledTimes(1));
+
+    const interruptResponse = await app.request(
+      "/v1/threads/app-thread-interrupt-failed/runs/interrupt",
+      { method: "POST" },
+    );
+    const interruptBody = await interruptResponse.json();
+
+    // 中断失败时也要尽力结束：返回 200，线程被强制标记为 completed。
+    expect(interruptResponse.status).toBe(200);
+    expect(interruptBody.thread).toMatchObject({
+      id: "app-thread-interrupt-failed",
+      state: "completed",
+    });
+
+    // 即使 app-server 仍把线程读成 running（残留锁），relay 也强制返回 completed，
+    // 避免客户端刷新后再次陷入“运行中”。
+    const detailResponse = await app.request("/v1/threads/app-thread-interrupt-failed", {
+      method: "GET",
+    });
+    const detailBody = await detailResponse.json();
+    expect(detailResponse.status).toBe(200);
+    expect(detailBody.thread.state).toBe("completed");
+
+    for (const handler of notificationHandlers) {
+      handler({
+        method: "turn/completed",
+        params: {
+          status: "completed",
+          threadId: "app-thread-interrupt-failed",
+          turnId: "turn-stuck",
+        },
+      });
+    }
+    await streamResponse.text();
+  });
+
   it("streams assistant items returned directly from app-server startTurn", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     const now = Date.now() / 1000;

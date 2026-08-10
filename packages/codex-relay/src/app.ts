@@ -337,6 +337,7 @@ export function createApp(options: AppOptions = {}) {
   const threadOperationTails = new Map<string, Promise<void>>();
   const workspaceTerminalSessions = new Map<string, WorkspaceTerminalSession>();
   const activeAppServerTurnIdsByThreadId = new Map<string, string>();
+  const forceEndedThreadIds = new Set<string>();
   const appServerHistoryLoadsByThreadId = new Map<string, Promise<void>>();
   const steeringThreads = new Set<string>();
   const secureSessionsByTokenHash = new Map<string, SecureSession>();
@@ -360,6 +361,28 @@ export function createApp(options: AppOptions = {}) {
     });
     return result;
   }
+  // 尽力中断：即使 app-server 的 interruptTurn 失败（进程无响应 / 锁残留），
+  // 也把 relay 侧活跃 turn、队列、steering 清掉，并将线程标记为 completed。
+  // 该线程在本次进程生命周期内会一直被强制视为 completed，避免 UI 永远卡在运行中。
+  const forceEndThreadRun = (threadId: string, reason: string) => {
+    forceEndedThreadIds.add(threadId);
+    activeAppServerTurnIdsByThreadId.delete(threadId);
+    queuedInputsByThreadId.delete(threadId);
+    steeringThreads.delete(threadId);
+    relayDebugLog("thread.force_end", { reason, threadId });
+    return updateThread(threads, messagesByThreadId, threadId, {
+      state: "completed",
+      lastError: undefined,
+    });
+  };
+  const applyForceEndedThreadState = (thread: ThreadMetadata) => {
+    if (!forceEndedThreadIds.has(thread.id)) {
+      return thread;
+    }
+    const next = ThreadSummarySchema.parse({ ...thread, state: "completed" });
+    threads.set(next.id, next);
+    return next;
+  };
   const pushNotificationSenders: PushNotificationSenders = {
     expo: options.pushNotificationSender ?? createExpoPushNotificationSender(),
     ...(options.hmsPushNotificationSender ? { hms: options.hmsPushNotificationSender } : {}),
@@ -1822,7 +1845,7 @@ export function createApp(options: AppOptions = {}) {
         const response: ListThreadsResponse = ListThreadsResponseSchema.parse({
           threads: appServerThreads
             .filter((thread) => !isSubagentThread(thread))
-            .map((thread) => rememberAppServerThread(threads, thread)),
+            .map((thread) => applyForceEndedThreadState(rememberAppServerThread(threads, thread))),
           source: "app-server",
         });
         return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
@@ -1849,13 +1872,14 @@ export function createApp(options: AppOptions = {}) {
         activeAppServerTurnIdsByThreadId.delete(threadId);
         queuedInputsByThreadId.delete(threadId);
         steeringThreads.delete(threadId);
+        forceEndedThreadIds.delete(threadId);
 
         const appServerThreads = await appServer.listThreads();
         const response: ArchiveThreadResponse = ArchiveThreadResponseSchema.parse({
           archivedThreadId: threadId,
           threads: appServerThreads
             .filter((thread) => !isSubagentThread(thread))
-            .map((thread) => rememberAppServerThread(threads, thread)),
+            .map((thread) => applyForceEndedThreadState(rememberAppServerThread(threads, thread))),
           source: "app-server",
         });
         return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
@@ -1887,6 +1911,7 @@ export function createApp(options: AppOptions = {}) {
     messagesByThreadId.delete(threadId);
     queuedInputsByThreadId.delete(threadId);
     steeringThreads.delete(threadId);
+    forceEndedThreadIds.delete(threadId);
     const response: ArchiveThreadResponse = ArchiveThreadResponseSchema.parse({
       archivedThreadId: threadId,
       threads: sortedThreads(threads),
@@ -1934,7 +1959,10 @@ export function createApp(options: AppOptions = {}) {
         const cachedMessages = messagesByThreadId.get(threadId) ?? [];
         let loadedMessages = false;
         let messages = cachedMessages;
-        let responseThread = preserveKnownRunningThreadState(mappedThread, wasKnownRunning);
+        let responseThread = preserveKnownRunningThreadState(
+          applyForceEndedThreadState(mappedThread),
+          wasKnownRunning,
+        );
 
         if (forceRefresh) {
           const threadWithTurns = await appServer.readThread(threadId, {
@@ -1945,7 +1973,10 @@ export function createApp(options: AppOptions = {}) {
           });
           // 刷新详情时即使服务端标记线程 running，也要保留运行中状态，
           // 避免把正在工作的会话误降级为 completed。
-          responseThread = preserveKnownRunningThreadState(responseThread, wasKnownRunning);
+          responseThread = preserveKnownRunningThreadState(
+            applyForceEndedThreadState(responseThread),
+            wasKnownRunning,
+          );
           const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
           messages = resolveThreadHistoryMessages(
             rolloutHistory.messages,
@@ -1974,7 +2005,10 @@ export function createApp(options: AppOptions = {}) {
               messages,
               rolloutHistory.messageCountLowerBound,
             );
-            responseThread = preserveKnownRunningThreadState(responseThread, wasKnownRunning);
+            responseThread = preserveKnownRunningThreadState(
+              applyForceEndedThreadState(responseThread),
+              wasKnownRunning,
+            );
             messagesByThreadId.set(threadId, messages);
             loadedMessages = true;
           } else if (cachedMessages.length > 0) {
@@ -2859,6 +2893,8 @@ export function createApp(options: AppOptions = {}) {
       );
     }
 
+    // 用户又主动给线程喂输入：视为重新开始，解除强制结束标记。
+    forceEndedThreadIds.delete(threadId);
     steeringThreads.add(threadId);
     await startAppServerTurn(appServer, threadId, queuedInput);
     const thread = updateThread(threads, messagesByThreadId, threadId, {
@@ -2921,16 +2957,17 @@ export function createApp(options: AppOptions = {}) {
       } catch {}
     }
     if (!turnId) {
-      relayDebugLog("thread.interrupt.rejected", {
+      relayDebugLog("thread.interrupt.forced", {
         reason: "no_active_turn",
         threadId,
       });
+      const thread = forceEndThreadRun(threadId, "no_active_turn");
       return secureJson(
         c,
         options.pairing,
         secureSessionsByTokenHash,
-        apiError("no_active_turn", `Thread ${threadId} does not have an active turn.`),
-        409,
+        InterruptThreadRunResponseSchema.parse({ thread }),
+        200,
       );
     }
 
@@ -2942,13 +2979,7 @@ export function createApp(options: AppOptions = {}) {
           threadId,
           turnId,
         });
-        activeAppServerTurnIdsByThreadId.delete(threadId);
-        queuedInputsByThreadId.delete(threadId);
-        steeringThreads.delete(threadId);
-        const thread = updateThread(threads, messagesByThreadId, threadId, {
-          state: "completed",
-          lastError: undefined,
-        });
+        const thread = forceEndThreadRun(threadId, "interrupt_already_completed");
         return secureJson(
           c,
           options.pairing,
@@ -2957,21 +2988,23 @@ export function createApp(options: AppOptions = {}) {
           200,
         );
       }
-      relayDebugLog("thread.interrupt.failed", {
+      relayDebugLog("thread.interrupt.failed_forced", {
         error: errorMessage(error),
         threadId,
         turnId,
       });
-      throw error;
+      // 中断失败（app-server 无响应 / turn 锁残留）：尽力归位，避免 UI 永久卡在运行中。
+      const thread = forceEndThreadRun(threadId, "interrupt_failed");
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        InterruptThreadRunResponseSchema.parse({ thread }),
+        200,
+      );
     }
     relayDebugLog("thread.interrupt.completed", { threadId, turnId });
-    activeAppServerTurnIdsByThreadId.delete(threadId);
-    queuedInputsByThreadId.delete(threadId);
-    steeringThreads.delete(threadId);
-    const thread = updateThread(threads, messagesByThreadId, threadId, {
-      state: "completed",
-      lastError: undefined,
-    });
+    const thread = forceEndThreadRun(threadId, "interrupt_success");
     return secureJson(
       c,
       options.pairing,
@@ -3119,6 +3152,8 @@ export function createApp(options: AppOptions = {}) {
           closeStream();
           return;
         }
+        // 携带 prompt 属于用户主动发起新任务：解除该线程的强制结束标记。
+        forceEndedThreadIds.delete(threadId);
         const skills = runOptions.skills ?? [];
         const prompt = rawPrompt;
         void runPromptStreamed({

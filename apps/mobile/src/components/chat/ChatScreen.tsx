@@ -164,6 +164,9 @@ const CONNECTION_HEALTH_CHECK_MS = 5000;
 const CONNECTION_RETRY_MS = 2500;
 const STREAM_STALL_RECONNECT_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 10_000;
+// 连续多次从服务端拿回 running 却始终收不到真实事件时，判定该线程实际已结束，
+// 主动把本地状态降级，避免 UI 永远卡在“正在生成”。
+const MAX_CONSECUTIVE_STUCK_RECOVERIES = 4;
 const SCANNER_TO_APPROVAL_SHEET_DELAY_MS = 450;
 const COPY_TOAST_VISIBLE_MS = 1800;
 const PREVIEW_RESIZE_HANDLE_WIDTH = 14;
@@ -391,6 +394,7 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
   const refreshPromiseRef = useRef<Promise<void> | undefined>(undefined);
   const lastStreamActivityAtRef = useRef(0);
   const streamGenerationRef = useRef(0);
+  const stuckRunningRecoveriesRef = useRef(0);
   const threadStatusPollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const activeThreadId = useSelector(() => chatStore$.activeThreadId.get());
   const connection = useSelector(() => chatStore$.connection.get());
@@ -789,6 +793,22 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
     [applyStatusFromServer, fetchCurrentStatus, syncPairedSessionState],
   );
 
+  const degradeStuckRunningThread = useCallback(
+    (threadId: string) => {
+      stuckRunningRecoveriesRef.current = 0;
+      clearThreadStatusPoll();
+      detachCurrentStream();
+      setThreadRunningState(queryClient, threadId, false);
+      clearQueuedPrompts(threadId);
+      setQueuedInputsState(queryClient, threadId, []);
+      Alert.alert(
+        "对话已结束",
+        "这个对话其实已经停止，但服务端仍把它标记为“正在生成”。\n\n已在本机把界面恢复为可继续对话的状态。如果再次发送时提示任务仍被占用，请重启 Codex Relay 服务。",
+      );
+    },
+    [clearQueuedPrompts, clearThreadStatusPoll, detachCurrentStream, queryClient],
+  );
+
   const recoverThreadAfterStreamLoss = useCallback(
     async (threadId: string, fallbackError: string) => {
       if (hasCodexRelaySession()) {
@@ -798,6 +818,12 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
       syncPairedSessionState();
       const state = await syncThreadSnapshot(threadId);
       if (state === "running" && chatStore$.activeThreadId.peek() === threadId) {
+        // 服务端仍说在跑，但流式连接总是断掉/无真实事件。连续多次后判定实际已结束。
+        stuckRunningRecoveriesRef.current += 1;
+        if (stuckRunningRecoveriesRef.current >= MAX_CONSECUTIVE_STUCK_RECOVERIES) {
+          degradeStuckRunningThread(threadId);
+          return;
+        }
         const thread = queryClient.getQueryData<
           Awaited<ReturnType<typeof serverStateQueryFns.thread>>
         >(serverStateKeys.thread(threadId))?.thread;
@@ -809,6 +835,7 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
         return;
       }
       if (state) {
+        stuckRunningRecoveriesRef.current = 0;
         clearThreadStatusPoll();
         return;
       }
@@ -816,6 +843,7 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
     },
     [
       clearThreadStatusPoll,
+      degradeStuckRunningThread,
       queryClient,
       scheduleThreadStatusPoll,
       syncPairedSessionState,
@@ -868,6 +896,8 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
             }
             markStreamActivity();
             receivedStreamEvent = true;
+            // 收到真实事件说明任务确实在跑，重置“疑似卡死”计数。
+            stuckRunningRecoveriesRef.current = 0;
             handleThreadRunStreamEvent(event, {
               fallbackThreadId: threadId,
               applyEvent: (streamEvent) => {
@@ -1176,14 +1206,28 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
 
       void syncThreadSnapshot(activeThreadId).then((state) => {
         if (state === "running" && chatStore$.activeThreadId.peek() === activeThreadId) {
+          stuckRunningRecoveriesRef.current += 1;
+          if (stuckRunningRecoveriesRef.current >= MAX_CONSECUTIVE_STUCK_RECOVERIES) {
+            degradeStuckRunningThread(activeThreadId);
+            return;
+          }
           detachCurrentStream();
           requestThreadStreamReconnect(activeThreadId);
+        } else if (state) {
+          stuckRunningRecoveriesRef.current = 0;
         }
       });
     }, STREAM_WATCHDOG_INTERVAL_MS);
 
     return () => clearInterval(watchdog);
-  }, [activeThreadId, connection, detachCurrentStream, isRunning, syncThreadSnapshot]);
+  }, [
+    activeThreadId,
+    connection,
+    degradeStuckRunningThread,
+    detachCurrentStream,
+    isRunning,
+    syncThreadSnapshot,
+  ]);
 
   useEffect(() => {
     if (connection !== "offline" || !hasPairedSession) {
@@ -1884,18 +1928,26 @@ export function ChatScreen({ initialPairingUrl }: ChatScreenProps = {}) {
     }
   }
 
-  function stopRun() {
+  async function stopRun() {
     clearThreadStatusPoll();
     detachCurrentStream();
-    if (activeThreadId) {
-      interruptThreadRun(activeThreadId).catch(() => undefined);
-    }
     setThreadRunningState(queryClient, activeThreadId, false);
-    clearQueuedPrompts();
-    if (activeThreadId) {
-      setQueuedInputsState(queryClient, activeThreadId, []);
-    }
+    clearQueuedPrompts(activeThreadId);
+    setQueuedInputsState(queryClient, activeThreadId, []);
     hapticWarning();
+    if (!activeThreadId) {
+      return;
+    }
+    try {
+      await interruptThreadRun(activeThreadId);
+    } catch (caught) {
+      // 中断失败不能静默吞掉：服务端锁可能还在，必须让用户知道。
+      syncPairedSessionState();
+      Alert.alert(
+        "停止未完成",
+        `服务端没能立即结束这个任务：${errorMessage(caught)}\n\n本机已恢复输入框；如果服务端仍把对话标记为运行中，请稍候几秒重试，或重启 Codex Relay 服务。`,
+      );
+    }
   }
 
   function saveThreadGoalObjective(objective: string) {
