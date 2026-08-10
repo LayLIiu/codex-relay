@@ -1,0 +1,51 @@
+{
+  "name": "codex-relay-panel-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Codex Relay 控制面板桌面版（Mac / Windows）",
+  "main": "main.js",
+  "scripts": {
+    "prebuild": "node scripts/prepare-vendor.mjs",
+    "start": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.codexrelay.panel",
+    "productName": "Codex Relay 控制面板",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "vendor/server.mjs",
+      "vendor/public/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/relay-server",
+        "to": "relay-server"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

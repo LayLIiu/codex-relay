@@ -14,6 +14,8 @@
     "codex-relay": "node scripts/relay-watchdog.mjs",
     "codex-relay:cli": "NODE_ENV=development pnpm --filter codex-relay exec tsx src/cli.ts",
     "panel": "node tools/relay-panel/server.mjs",
+    "panel:desktop": "cd tools/relay-panel-desktop && npm start",
+    "panel:desktop:build": "cd tools/relay-panel-desktop && npm run build:mac",
     "lint": "oxlint apps packages --import-plugin --react-plugin --jsx-a11y-plugin --vitest-plugin && pnpm format:check",
     "lint:fix": "oxlint apps packages --import-plugin --react-plugin --jsx-a11y-plugin --vitest-plugin --fix && pnpm format",
     "format": "oxfmt . --write",
