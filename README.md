@@ -1,41 +1,28 @@
-# Codex Relay
+# Codex Relay（自建版）
 
 <p align="center">
   <img src="./docs/readme-assets/icon.png" alt="Codex Relay app icon" width="96" />
 </p>
 
 <p align="center">
-  <strong>Use Codex from your phone while the real work stays on your computer.</strong>
+  <strong>用手机遥控电脑上的 Codex，真正的活还是在你电脑上干。</strong>
 </p>
 
 <p align="center">
-  <a href="https://apps.apple.com/kr/app/codex-relay/id6764463488">
-    <img
-      alt="Download on the App Store"
-      src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en?size=250x83"
-      height="40"
-    />
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://www.npmjs.com/package/codex-relay"><img alt="npm" src="https://img.shields.io/npm/v/codex-relay?style=flat-square"></a>
-  <a href="https://apps.apple.com/kr/app/codex-relay/id6764463488"><img alt="App Store" src="https://img.shields.io/badge/App%20Store-Codex%20Relay-111111?style=flat-square"></a>
   <img alt="Node.js" src="https://img.shields.io/badge/node-%3E%3D22.14-111111?style=flat-square">
+  <img alt="pnpm" src="https://img.shields.io/badge/pnpm-%3E%3D11-111111?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-111111?style=flat-square">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-iOS%20%7C%20HarmonyOS-111111?style=flat-square">
 </p>
 
-Codex Relay is a mobile companion for the Codex CLI. It runs a local relay
-server in your workspace, pairs with the mobile app over your own network, and
-lets you follow or steer Codex sessions from your phone.
+Codex Relay 是一个「本地优先」的 Codex 移动端配套方案：在本机工作区跑一个
+Relay 服务，手机通过局域网（或公网）与它配对，就能随时跟进、继续、打断
+电脑上的 Codex 会话。
 
-Codex Relay is an independent project. It is not affiliated with, endorsed by,
-or sponsored by OpenAI or the OpenAI Codex team.
-
-The project is intentionally local-first. Your code, shell, git state, and
-Codex CLI session stay on your computer; the phone talks to the relay that you
-run.
+> 本仓库是**自建 / 开发版 monorepo**：除了核心 Relay 服务端，还包含 iOS 移动端、
+> HarmonyOS 客户端、网页版与桌面版控制面板。它是独立项目，与 OpenAI 及其
+> Codex 团队没有任何关联、背书或赞助关系。
 
 <p align="center">
   <img src="./docs/readme-assets/demo.gif" alt="Codex Relay mobile demo" width="60%" />
@@ -48,194 +35,196 @@ run.
   <img src="./docs/readme-assets/settings.png" alt="Codex Relay settings screen" width="23%" />
 </p>
 
-## What It Does
+## 核心能力
 
-- Stream Codex output from a local workspace to a paired mobile app.
-- Send prompts, continue threads, and respond when Codex needs input.
-- Review active threads, queued inputs, approvals, and workspace state.
-- Preview git changes, local web output, files, and terminal surfaces from
-  mobile.
-- Choose separate turn-complete and action-required push notifications.
-- Keep pairing and session data under your local relay state.
+- 把本机工作区的 Codex 输出流式推送到已配对的手机端。
+- 手机端可发起提示词、继续线程，并在 Codex 需要输入时作出响应。
+- 查看活动线程、排队输入、审批请求与工作区状态。
+- 手机端预览 git 变更、本地 Web 输出、文件与终端界面。
+- 分开的「回合完成」与「需要操作」两类推送通知。
+- 配对与会话数据只保存在本地 Relay 状态里，不经过第三方。
 
-## Quick Start
+## 仓库结构
 
-### Requirements
+本仓库是 pnpm monorepo，根工作区包含 `apps/*` 与 `packages/*`：
 
-- Node.js 22.14 or newer
-- Codex CLI installed and signed in
-- [Codex Relay on your phone](https://apps.apple.com/kr/app/codex-relay/id6764463488)
-- A network path from your phone to your computer
+| 路径 | 说明 |
+| --- | --- |
+| `packages/codex-relay` | 核心 Relay 服务端（Hono）。CLI + HTTP 服务 + 配对/会话管理，含 Vitest 测试。开发态默认监听 `8787` |
+| `packages/react-native-direct-fetch` | React Native 侧直连 Relay 的辅助库 |
+| `apps/mobile` | iOS 移动端（Expo + React Native + expo-router），用 dev-client 开发 |
+| `apps/hm_codex` | HarmonyOS 客户端（git 子模块，DevEco Studio 工程） |
+| `tools/relay-panel` | 网页版控制面板：一键启停 Relay、配对二维码、批准配对、看日志 |
+| `tools/relay-panel-desktop` | Electron 桌面版控制面板：把「面板 + Relay 服务器」打包成可双击运行的 App |
 
-### 1. Start the relay
+## 快速开始（开发模式）
 
-From the workspace where you want Codex to work:
+### 前置要求
 
-```sh
-npx codex-relay@latest
-```
+- Node.js 22.14+、pnpm 11+
+- Codex CLI 已安装并登录
+- iOS 端：macOS + Xcode（跑模拟器 / 真机）
+- HarmonyOS 端：DevEco Studio（构建 `apps/hm_codex` 子模块）
+- 手机与电脑之间有一条可达的网络路径（同 Wi-Fi 或 Tailscale）
 
-The relay prints a QR code, a mobile URL, and a `codex-relay://pair...` pairing
-link.
-
-### 2. Pair the app
-
-Open the mobile app and scan the QR code printed by the relay. If scanning is
-not available, paste the full `codex-relay://pair...` link into the app.
-
-When the app shows an approval code, approve it from your computer:
+### 1. 安装依赖
 
 ```sh
-npx codex-relay@latest approve XXXX-XXXX
+pnpm install
 ```
 
-Your phone can now talk to your local Codex session.
-
-### 3. Optional: share a live session with your terminal
-
-The default relay uses its own Codex app-server process. To make mobile and a terminal TUI use the same shared app-server, start the relay with:
+### 2. 启动 Relay 服务端
 
 ```sh
-npx codex-relay@latest --shared-app-server
+pnpm dev
 ```
 
-When a shared app-server is already running, the relay attaches to it instead of starting another one. If the relay's own socket connection resets, it reconnects without deliberately stopping the shared app-server.
+等价于 `pnpm dev:server`（`tsx watch` 开发态，默认监听 `8787`）。服务端会打印
+配对二维码、手机 URL 与 `codex-relay://pair...` 配对链接。
 
-Then attach a new terminal TUI. On macOS, Linux, or WSL:
+### 3. 启动控制面板
 
 ```sh
-codex resume --remote unix://
+pnpm panel
 ```
 
-On native Windows:
+浏览器打开 **http://127.0.0.1:7800** 即可管理 Relay（详见下文「控制面板」）。
 
-```powershell
-codex resume --remote ws://127.0.0.1:8788
-```
+### 4. 运行移动端
 
-An already-running standalone TUI cannot be converted in place. Exit it and reconnect with `--remote`. Shared mode requires a recent Codex CLI with app-server and remote-resume support. It uses a Unix socket on macOS, Linux, and WSL, or a loopback-only WebSocket on Windows.
-
-Shared mode uses Codex's experimental app-server transport. A directly connected terminal TUI has its own WebSocket connection, which the relay cannot observe or reconnect. If that terminal reports a socket reset while the thread continues on mobile, reconnect it with the matching remote endpoint above and append the thread ID if needed.
-
-### Push notifications
-
-After pairing, open **Settings > Notifications** in the mobile app and enable either or both alerts:
-
-- **Turn complete** for completed or failed Codex turns
-- **Action required** for approval and input requests
-
-The relay sends only a generic alert plus opaque thread and turn identifiers needed to open the conversation. It does not send prompts, responses, commands, or approval text through the push service. Push support requires a native mobile build that includes `expo-notifications`; an OTA update alone cannot add that native module.
-
-## Network Setup
-
-Your phone must be able to open the `Mobile:` URL printed by Codex Relay.
-
-- Same Wi-Fi usually works.
-- Tailscale is a good default when the devices are on different networks.
-
-### Tailscale and Web Previews
-
-Pairing only makes the Codex Relay server reachable. If you open a local web
-app from the mobile Web preview, that app's port must also be reachable from
-the phone.
-
-When using Tailscale, prefer [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
-for preview ports so the iOS WebView loads the site over HTTPS. For example,
-if your local app runs on `http://127.0.0.1:3000`:
+iOS（真机 / 模拟器）：
 
 ```sh
-tailscale serve 3000
+pnpm dev:mobile:ios
 ```
 
-Tailscale prints an `https://<machine>.<tailnet>.ts.net` URL. Open that HTTPS
-URL in the mobile Web preview instead of `http://100.x.y.z:3000`. If the Web
-preview says App Transport Security requires a secure connection, the app is
-trying to load a plain HTTP URL; expose that same port with `tailscale serve`
-or another HTTPS tunnel and retry.
+HarmonyOS：用 DevEco Studio 打开 `apps/hm_codex` 子模块，构建安装到设备。
 
-The mobile Web preview also detects `http://100.x.y.z:<port>` and
-`http://<machine>.<tailnet>.ts.net:<port>` URLs. When detected, tap **Serve**
-in the Tailscale row to run Tailscale Serve for that port from the relay machine
-and switch the preview to the returned HTTPS URL automatically.
+### 5. 配对
 
-## Contributing
-
-Please use English as the default language for GitHub issues, pull requests,
-and maintainer-facing discussions. If English is difficult, start with a short
-English summary and then include the rest in the language you are most
-comfortable using.
-
-Before opening a connection issue, confirm the network checklist in the issue
-template. Most pairing failures happen because the phone cannot reach the relay
-URL printed by the computer.
-
-Changes to the published `codex-relay` package should include a changeset:
+手机端扫描服务端 / 面板打印的二维码；扫不了就把 `codex-relay://pair...` 链接
+粘贴进 App。手机出现 `XXXX-XXXX` 审批码后，在本机批准：
 
 ```sh
-pnpm changeset
+pnpm codex-relay:cli approve XXXX-XXXX
 ```
 
-Commit the generated file with the change. The release workflow maintains a
-release pull request and publishes it after that pull request is merged. See
-[the Changesets guide](./.changeset/README.md) for the release process.
+或直接在控制面板里输入配对码批准。
 
-## Common Commands
+## 控制面板
 
-| Command                                      | What it does                                        |
-| -------------------------------------------- | --------------------------------------------------- |
-| `npx codex-relay@latest`                     | Start the relay and print a pairing QR.             |
-| `npx codex-relay@latest --bg`                | Keep the relay running in the background.           |
-| `npx codex-relay@latest --shared-app-server` | Share live sessions with an attached terminal TUI.  |
-| `npx codex-relay@latest qr`                  | Print the current pairing QR for an existing relay. |
-| `npx codex-relay@latest approve XXXX-XXXX`   | Approve a pending mobile pairing request.           |
-| `npx codex-relay@latest clear`               | Sign out every paired mobile app.                   |
-
-## Configuration
-
-The relay listens on `0.0.0.0:8787` by default.
-
-| Variable                      | Purpose                                                             |
-| ----------------------------- | ------------------------------------------------------------------- |
-| `PORT`                        | Server port. Defaults to `8787`.                                    |
-| `HOST`                        | Listen host. Defaults to `0.0.0.0`.                                 |
-| `CODEX_RELAY_WORKSPACE_PATH`  | Workspace path Codex should use. Defaults to the current directory. |
-| `CODEX_RELAY_AUTH_DB_PATH`    | Pairing and session database path.                                  |
-| `CODEX_RELAY_APP_SERVER_MODE` | `socket` for shared terminal/mobile sessions; defaults to `stdio`.  |
-| `CODEX_BIN`                   | Codex CLI executable path.                                          |
-| `CODEX_HOME`                  | Codex home directory for reading local session metadata.            |
-
-Background mode writes runtime files under `.codex-relay/` in the current
-workspace, including server logs, process state, and pairing data.
-
-## Troubleshooting
-
-If `qr` cannot find a server, start one first:
+### 网页版（`tools/relay-panel`）
 
 ```sh
-npx codex-relay@latest
+pnpm panel
 ```
 
-If another process is using the local pairing database, use the existing server:
+浏览器打开 http://127.0.0.1:7800：
+
+- 一键启动 / 停止 `17878` 端口的 Relay 服务
+- 显示配对二维码（默认本地 / 局域网；配置 `PUBLIC_URL` 后展示公网配对码）
+- 输入 `XXXX-XXXX` 配对码批准设备
+- 查看服务日志
+
+端口可用环境变量调整：`PANEL_PORT`（默认 `7800`）、`RELAY_PORT`（默认 `17878`）。
+二维码使用仓库内置的 `qrcode.min.js`，**完全离线可用**。
+
+### 桌面版（`tools/relay-panel-desktop`）
+
+Electron 应用，把「控制面板 + Relay 服务器」打包在一起：双击即可运行，
+无需开终端、无需装 Node / pnpm，自带完整 Relay 服务器（构建产物 + 运行时依赖 +
+native 模块）。
 
 ```sh
-npx codex-relay@latest qr
+cd tools/relay-panel-desktop
+npm install
+npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 Windows 上构建）
 ```
 
-If the mobile app cannot connect, confirm that the phone can reach the printed
-`Mobile:` URL and that your firewall allows traffic on the relay port.
+桌面版详细说明见
+[tools/relay-panel-desktop/README.md](./tools/relay-panel-desktop/README.md)。
 
-Connection checklist:
+## 常用命令
 
-- Are the phone and computer on the same Wi-Fi or LAN?
-- If keeping the same network is difficult, are both devices connected through
-  Tailscale or another reachable private network?
-- Can the phone open the exact `Mobile:` URL printed by the relay?
-- Does the computer firewall allow inbound traffic on the relay port, usually
-  `8787`?
+| 命令 | 作用 |
+| --- | --- |
+| `pnpm dev` / `pnpm dev:server` | 启动 Relay 服务端（`tsx watch`，8787） |
+| `pnpm panel` | 启动网页版控制面板（7800） |
+| `pnpm panel:desktop` | Electron 开发模式运行桌面版 |
+| `pnpm panel:desktop:build` | 构建桌面版 mac 安装包 |
+| `pnpm dev:mobile` | 启动 Expo Metro（dev-client） |
+| `pnpm dev:mobile:ios` | 构建并运行 iOS dev-client |
+| `pnpm dev:mobile:android` | 构建并运行 Android dev-client |
+| `pnpm codex-relay:cli` | 直接跑 relay CLI（开发态） |
+| `pnpm test` | 跑服务端 Vitest 套件 |
+| `pnpm typecheck` | 全仓 `tsc --noEmit` |
+| `pnpm lint` / `pnpm lint:fix` | oxlint + oxfmt 检查 / 自动修复 |
+| `pnpm format` | oxfmt 全仓格式化 |
+
+## 配置与环境变量
+
+Relay 服务端默认监听 `0.0.0.0:8787`：
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `PORT` | Relay 服务端口 | `8787` |
+| `HOST` | 监听地址 | `0.0.0.0` |
+| `CODEX_RELAY_WORKSPACE_PATH` | Codex 使用的工作区路径 | 当前目录 |
+| `CODEX_RELAY_AUTH_DB_PATH` | 配对与会话数据库路径 | — |
+| `CODEX_RELAY_APP_SERVER_MODE` | `socket` 共享终端/移动端会话 | `stdio` |
+| `CODEX_BIN` | Codex CLI 可执行文件路径 | — |
+| `CODEX_HOME` | 读取本地会话元数据的 Codex 家目录 | — |
+| `EXPO_PUBLIC_CODEX_RELAY_SERVER_URL` | 移动端连接 Relay 的地址（真机用 `http://<局域网IP>:8787`） | `http://127.0.0.1:8787` |
+
+控制面板：
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `PANEL_PORT` | 面板端口 | `7800` |
+| `RELAY_PORT` | 面板管理的 Relay 端口 | `17878` |
+| `PUBLIC_URL` | 设置后生成公网配对码（如 `http://host:8789`），默认不写死 | 空 |
+
+后台运行时，运行时文件（日志、进程状态、配对数据）写在当前工作区的
+`.codex-relay/` 下。
+
+## 测试与质量
+
+```sh
+pnpm test          # 服务端 Vitest
+pnpm typecheck     # 全仓类型检查
+pnpm lint          # oxlint + oxfmt 检查
+pnpm lint:fix      # 自动修复并格式化
+```
+
+服务端测试位于 `packages/codex-relay/test`，改动 API、校验、流式、线程状态时
+建议补上对应覆盖。
+
+## 架构速览
+
+```
+手机端（iOS / HarmonyOS）
+      │  配对码 / 会话 / 流式输出
+      ▼
+Relay 服务端（packages/codex-relay, Hono）
+      │  启动 Codex CLI app-server
+      ▼
+本机 Codex CLI / 工作区（git、shell、文件）
+```
+
+控制面板（网页 / 桌面）则是面向本机的运维入口：启停 Relay、展示配对二维码、
+批准设备、查看日志。
+
+## 贡献
+
+- 提交信息与 PR 描述使用中文或英文均可，保持简洁（沿用仓库现有惯例）。
+- 对服务端 API、流式、线程状态的改动，请补测试并跑 `pnpm test`、
+  `pnpm typecheck`、`pnpm lint`。
+- 移动端改动以类型检查 + dev-client / 真机验证为主，PR 里注明验证方式。
+- 涉及移动端 UI 的改动，尽量附上模拟器 / 真机截图或录屏。
 
 ## License
 
-Codex Relay is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
+Codex Relay 采用 Apache License 2.0，见 [LICENSE](./LICENSE)。
 
-The Codex Relay name, logos, app icons, screenshots, and other brand assets are
-not licensed under Apache-2.0. See [TRADEMARKS.md](./TRADEMARKS.md).
+Codex Relay 名称、Logo、应用图标、截图等品牌资产不在 Apache-2.0 许可范围内，
+见 [TRADEMARKS.md](./TRADEMARKS.md)。

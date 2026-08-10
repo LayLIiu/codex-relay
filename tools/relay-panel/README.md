@@ -27,7 +27,11 @@ pnpm panel
 - 「批准」直接调用服务端的 `POST /v1/pair/approve` 接口，审批密钥从
   `approval-secret` 文件（或 `CODEX_RELAY_APPROVAL_SECRET` 环境变量）读取。
 
-## 二维码离线兜底
+## 二维码本地化
 
-二维码使用 jsDelivr CDN 的 `qrcode` 库在浏览器本地生成。若离线无法加载 CDN，
-页面会显示配对链接原文，可直接复制后在鸿蒙端 App「连接 Relay」页粘贴。
+二维码使用仓库内置的 `public/qrcode.min.js` 在浏览器本地生成，**完全离线可用**，
+不依赖任何 CDN。
+
+默认展示本地/局域网配对码；设置 `PUBLIC_URL` 环境变量（如
+`PUBLIC_URL=http://host:8789 pnpm panel`）后，面板会额外生成并展示公网配对码，
+同时显示「局域网备选」地址。
