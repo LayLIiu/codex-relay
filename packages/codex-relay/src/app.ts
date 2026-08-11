@@ -4043,7 +4043,9 @@ async function streamRunningAppServerThread(input: {
           message,
         });
       }
-      if (threadSummary.state !== "running" && incomingMessages.length > 0) {
+      // 终态发送不应依赖本轮是否读到消息：线程已结束但 turns 读空时，
+      // 也必须下发 thread.state.changed，否则 attach 端永远等不到终态。
+      if (threadSummary.state !== "running") {
         sendSse(input.controller, input.encoder, input.secureSession, {
           type: "thread.state.changed",
           thread: threadSummary,
@@ -8088,7 +8090,17 @@ function mapAppServerThreadStatusState(status: unknown) {
   if (["failed", "systemerror", "error"].includes(statusType)) {
     return "failed";
   }
-  if (["completed", "complete", "done"].includes(statusType)) {
+  if ([
+    "completed",
+    "complete",
+    "done",
+    "interrupted",
+    "aborted",
+    "cancelled",
+    "canceled",
+    "stopped",
+    "declined",
+  ].includes(statusType)) {
     return "completed";
   }
   if (["idle", "notloaded", "notstarted"].includes(statusType)) {
@@ -8108,7 +8120,17 @@ function mapAppServerTurnStatusState(status: unknown) {
   if (["failed", "systemerror", "error"].includes(statusType)) {
     return "failed";
   }
-  if (["completed", "complete", "done", "interrupted"].includes(statusType)) {
+  if ([
+    "completed",
+    "complete",
+    "done",
+    "interrupted",
+    "aborted",
+    "cancelled",
+    "canceled",
+    "stopped",
+    "declined",
+  ].includes(statusType)) {
     return "completed";
   }
   if (["idle", "notloaded", "notstarted"].includes(statusType)) {

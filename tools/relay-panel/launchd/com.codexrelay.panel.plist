@@ -13,6 +13,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>PUBLIC_URL</key>
+        <string>http://47.102.141.228:8789</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
