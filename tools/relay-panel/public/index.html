@@ -110,6 +110,31 @@
       word-break: break-all;
       text-align: center;
     }
+    .copy-row {
+      display: flex;
+      gap: 8px;
+      width: 100%;
+      align-items: stretch;
+    }
+    .copy-row .pair-payload {
+      flex: 1;
+      margin: 0;
+    }
+    .copy-btn {
+      flex: 0 0 72px;
+      height: 44px;
+      border: 1px solid #2a313d;
+      border-radius: 8px;
+      background: #1b2029;
+      color: #cfd6e0;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.05s;
+    }
+    .copy-btn:hover { background: #242c38; }
+    .copy-btn:active { transform: scale(0.97); }
+    .copy-btn.copied { color: #7fe0a0; border-color: #2e5b44; }
     .row { display: flex; gap: 10px; }
     .row input {
       flex: 1;
@@ -180,7 +205,10 @@
         <div class="qr-box" id="qrBox">
           <div class="qr-placeholder">先点击上方「启动服务」<br />二维码会在这里显示</div>
         </div>
-        <div class="pair-payload" id="pairPayload">—</div>
+        <div class="copy-row">
+          <div class="pair-payload" id="pairPayload">—</div>
+          <button class="copy-btn" id="copyBtn">复制</button>
+        </div>
         <div class="lan-note" id="lanNote">局域网备选：—</div>
       </div>
     </div>
@@ -329,6 +357,36 @@
     $("approveCode").addEventListener("input", (e) => {
       const upper = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
       e.target.value = upper.length > 4 ? upper.slice(0, 4) + "-" + upper.slice(4, 8) : upper;
+    });
+
+    $("copyBtn").addEventListener("click", async () => {
+      const text = $("pairPayload").textContent.trim();
+      if (!text || text === "—") {
+        return;
+      }
+      const markCopied = () => {
+        const btn = $("copyBtn");
+        btn.textContent = "已复制";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = "复制";
+          btn.classList.remove("copied");
+        }, 1500);
+      };
+      try {
+        await navigator.clipboard.writeText(text);
+        markCopied();
+      } catch (_) {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        markCopied();
+      }
     });
 
     refreshStatus();
