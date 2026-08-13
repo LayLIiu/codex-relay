@@ -808,7 +808,7 @@ export function createApp(options: AppOptions = {}) {
         await desktopControl.ensureRemoteControl();
       }
       const launched = {
-        codexBinary: localDesktopControl ? "Codex CDP.app" : "codex",
+        codexBinary: localDesktopControl ? "Codex Desktop (IPC)" : "codex",
         launched: true,
         workspacePath: targetWorkspacePath,
       };

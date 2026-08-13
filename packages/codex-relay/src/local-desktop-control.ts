@@ -77,6 +77,9 @@ export function createLocalDesktopControl(
     options.bundleId?.trim() || env.CODEX_DESKTOP_BUNDLE_ID?.trim() || "com.openai.codex";
   const cdpPort = Number(options.cdpPort ?? env.CODEX_DESKTOP_CDP_PORT ?? 39_252);
   const cdpAddress = env.CODEX_DESKTOP_CDP_ADDRESS?.trim() || "127.0.0.1";
+  const useCdp =
+    env.CODEX_DESKTOP_USE_CDP?.trim().toLowerCase() === "1" ||
+    env.CODEX_DESKTOP_LAUNCH_MODE?.trim().toLowerCase() === "cdp";
   const repoRoot = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
   const repoLauncherPath = resolve(
     fileURLToPath(new URL("../../../tools/Codex CDP.app", import.meta.url)),
@@ -88,12 +91,7 @@ export function createLocalDesktopControl(
   ].filter((candidate): candidate is string => Boolean(candidate));
 
   async function isAvailable() {
-    try {
-      const targets = await getCdpTargets();
-      return findCodexTarget(targets) !== null;
-    } catch {
-      return false;
-    }
+    return desktopIpc.isAvailable();
   }
 
   async function ensureAvailable() {
@@ -101,14 +99,30 @@ export function createLocalDesktopControl(
       return;
     }
     if (await isCodexAppRunning()) {
-      throw new Error(
-        "原版 ChatGPT/Codex 正在运行但没有开启 CDP。请先退出原版，再用「Codex CDP」图标启动。",
-      );
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (await isAvailable()) {
+          return;
+        }
+        await sleep(300);
+      }
+      throw new Error("Codex 桌面端已运行，但本地 IPC 尚未就绪。");
     }
     await launchApp();
   }
 
   async function launchApp() {
+    if (!useCdp) {
+      await execFileAsync("/usr/bin/open", ["-a", appPath]);
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (await isAvailable()) {
+          return;
+        }
+        await sleep(300);
+      }
+      throw new Error("Codex 桌面端已启动，但本地 IPC 尚未就绪。");
+    }
     const launcherPath = resolveLauncherAppPath();
     if (!launcherPath) {
       throw new Error("找不到 Codex CDP.app 启动器");
@@ -165,13 +179,19 @@ export function createLocalDesktopControl(
       anchorThreadId?: string;
     } = {},
   ) {
-    await ensureAvailable();
+    try {
+      await ensureAvailable();
+    } catch {
+      // IPC 未就绪时仍先尝试深链新建，桌面端启动后 session_index 会继续写入。
+    }
     const before = sessionIndexThreadIds();
     let beforeThreadId: string | undefined;
-    try {
-      beforeThreadId = await readDesktopThreadIdFromCdp();
-    } catch {
-      // 桌面端可能还没有进入可读的会话页面，先继续走深链。
+    if (useCdp) {
+      try {
+        beforeThreadId = await readDesktopThreadIdFromCdp();
+      } catch {
+        // 桌面端可能还没有进入可读的会话页面，先继续走深链。
+      }
     }
     const scope = input.scope ?? (input.workspacePath ? "project" : "conversation");
     if (scope === "project" && input.workspacePath) {
@@ -196,26 +216,28 @@ export function createLocalDesktopControl(
       await sleep(220);
     }
 
-    try {
-      const afterDeepLink = await readDesktopThreadIdFromCdp();
-      if (afterDeepLink && afterDeepLink !== beforeThreadId) {
-        return { threadId: afterDeepLink, pending: false };
+    if (useCdp) {
+      try {
+        const afterDeepLink = await readDesktopThreadIdFromCdp();
+        if (afterDeepLink && afterDeepLink !== beforeThreadId) {
+          return { threadId: afterDeepLink, pending: false };
+        }
+      } catch {
+        // 继续尝试通过 UI 新建。
       }
-    } catch {
-      // 继续尝试通过 UI 新建。
-    }
 
-    try {
-      await clickNewThreadViaCdp(input.workspacePath);
-      await sleep(800);
-      const afterClick = await readDesktopThreadIdFromCdp();
-      if (afterClick && afterClick !== beforeThreadId) {
-        return { threadId: afterClick, pending: false };
+      try {
+        await clickNewThreadViaCdp(input.workspacePath);
+        await sleep(800);
+        const afterClick = await readDesktopThreadIdFromCdp();
+        if (afterClick && afterClick !== beforeThreadId) {
+          return { threadId: afterClick, pending: false };
+        }
+      } catch (error) {
+        relayDebugLog("desktop.new_thread_cdp_failed", {
+          message: errorMessage(error),
+        });
       }
-    } catch (error) {
-      relayDebugLog("desktop.new_thread_cdp_failed", {
-        message: errorMessage(error),
-      });
     }
     return { pending: true };
   }
@@ -297,29 +319,76 @@ export function createLocalDesktopControl(
   }
 
   async function stop(input: { threadId?: string } = {}) {
-    await ensureAvailable();
     if (input.threadId) {
-      await openThread(input.threadId);
+      try {
+        await desktopIpc.sendRequest("thread-follower-interrupt-turn", {
+          conversationId: input.threadId,
+          turnId: null,
+        });
+        return;
+      } catch (ipcError) {
+        relayDebugLog("desktop.ipc_stop_failed", {
+          message: errorMessage(ipcError),
+          threadId: input.threadId,
+        });
+        await openThread(input.threadId);
+      }
+    } else {
+      try {
+        await ensureAvailable();
+      } catch {
+        // 没有指定线程时继续尝试桌面端自动化停止。
+      }
     }
     await pressCancelCodexResponse();
   }
 
   async function selectModel(input: { threadId?: string; target?: string } = {}) {
-    await ensureAvailable();
-    if (input.threadId) {
-      await openThread(input.threadId);
-    }
     const target = resolveModelTarget(input.target);
+    if (input.threadId) {
+      try {
+        await desktopIpc.sendRequest("thread-follower-update-thread-settings", {
+          conversationId: input.threadId,
+          threadSettings: {
+            model: target.id,
+            effort: null,
+            serviceTier: null,
+          },
+        });
+        return { target: target.displayName };
+      } catch (ipcError) {
+        relayDebugLog("desktop.ipc_model_failed", {
+          message: errorMessage(ipcError),
+          threadId: input.threadId,
+        });
+        await openThread(input.threadId);
+      }
+    }
     await pasteCommandAndOption("/模型", target.displayName, CODEX_MODEL_COMMAND_SETTLE_MS);
     return { target: target.displayName };
   }
 
   async function selectReasoningMode(input: { threadId?: string; target?: string } = {}) {
-    await ensureAvailable();
-    if (input.threadId) {
-      await openThread(input.threadId);
-    }
     const target = resolveReasoningModeTarget(input.target);
+    if (input.threadId) {
+      try {
+        await desktopIpc.sendRequest("thread-follower-update-thread-settings", {
+          conversationId: input.threadId,
+          threadSettings: {
+            model: null,
+            effort: target.value,
+            serviceTier: null,
+          },
+        });
+        return { target: target.label };
+      } catch (ipcError) {
+        relayDebugLog("desktop.ipc_reasoning_failed", {
+          message: errorMessage(ipcError),
+          threadId: input.threadId,
+        });
+        await openThread(input.threadId);
+      }
+    }
     await pasteCommandAndOption("/推理模式", target.label, CODEX_REASONING_COMMAND_SETTLE_MS);
     return { target: target.label };
   }
@@ -329,7 +398,6 @@ export function createLocalDesktopControl(
     action: LocalDesktopThreadAction;
     name?: string;
   }) {
-    await ensureAvailable();
     await openThread(input.threadId);
     if (input.action === "archive") {
       await pressCodexShortcut("a", ["command", "shift"]);
@@ -373,11 +441,23 @@ export function createLocalDesktopControl(
         threadId: input.threadId,
       });
     }
-    await ensureAvailable();
+    try {
+      await ensureAvailable();
+    } catch {
+      // IPC 未就绪时继续走 macOS 自动化兜底，不再要求 CDP。
+    }
     try {
       await openThread(input.threadId);
     } catch {
       // Desktop may already be showing the target conversation.
+    }
+    if (!useCdp) {
+      try {
+        await sendPromptViaMacAutomation(input.prompt);
+        return;
+      } catch (automationError) {
+        throw new Error(`桌面端发送失败（自动化: ${errorMessage(automationError)}）`);
+      }
     }
     try {
       await sendPromptViaCdp(input.prompt);

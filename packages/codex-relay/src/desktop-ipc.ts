@@ -9,6 +9,7 @@ const METHOD_VERSIONS: Record<string, number> = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 3,
   "thread-follower-set-model-and-reasoning": 1,
+  "thread-follower-update-thread-settings": 1,
   "thread-follower-load-complete-history": 1,
   "client-status-changed": 1,
 };

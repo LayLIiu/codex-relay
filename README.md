@@ -165,13 +165,13 @@ npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 W
 
 ## 配置与环境变量
 
-### Codex CDP 启动器
+### Codex 桌面端控制（默认 IPC）
 
-仓库内置 `tools/Codex CDP.app`，用于启动带本地调试接口的 Codex 桌面端：
+Relay 默认通过 Codex 桌面端本地的 `~/.codex/ipc/ipc.sock` 控制会话，不依赖 CDP：
 
-- 不会修改或自动关闭原版 ChatGPT/Codex。
-- 如果原版已经在运行，启动器会提示先手动退出原版。
-- 正常启动后监听 `127.0.0.1:39252`，Relay 桌面端模式通过该接口读写会话。
+- 发送消息走 `thread-follower-start-turn`，新建会话用 `codex://threads/new` 深链加 `session_index` 读取新 ID。
+- 停止和模型/推理档位优先走桌面 IPC，失败才回退 macOS 自动化。
+- 只有显式设置 `CODEX_DESKTOP_USE_CDP=1` 或 `CODEX_DESKTOP_LAUNCH_MODE=cdp` 时，才使用仓库内置的 `tools/Codex CDP.app` 启动带本地调试接口的桌面端。
 
 ### 环境变量
 
@@ -188,6 +188,8 @@ Relay 服务端默认监听 `0.0.0.0:8787`：
 | `CODEX_DESKTOP_BIN` | Codex 桌面端可执行文件路径，缺省优先使用 ChatGPT.app 内置二进制 | — |
 | `CODEX_DESKTOP_APP_PATH` | Codex/ChatGPT 桌面 App 路径，用于官方 Remote Control 设备密钥 | `/Applications/ChatGPT.app` |
 | `CODEX_DESKTOP_CDP_PORT` | 本地 Codex Desktop CDP 调试端口 | `39252` |
+| `CODEX_DESKTOP_USE_CDP` | 设为 `1` 时启用 CDP 启动/回退路径 | 空 |
+| `CODEX_DESKTOP_LAUNCH_MODE` | 设为 `cdp` 时使用 Codex CDP 启动器 | 空 |
 | `CODEX_DESKTOP_BUNDLE_ID` | Codex 桌面 App Bundle ID | `com.openai.codex` |
 | `CODEX_DESKTOP_CDP_LAUNCHER_APP` | Codex CDP 启动器 App 路径 | `tools/Codex CDP.app` |
 | `CODEX_HOME` | 读取本地会话元数据的 Codex 家目录 | — |
