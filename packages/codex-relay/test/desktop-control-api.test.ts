@@ -31,6 +31,12 @@ describe("POST /v1/desktop/launch", () => {
       launchApp: vi.fn<() => Promise<void>>(async () => {}),
       openThread: vi.fn<() => Promise<void>>(async () => {}),
       sendPrompt: vi.fn<() => Promise<void>>(async () => {}),
+      sendPromptWithOptions: vi.fn<() => Promise<void>>(async () => {}),
+      setRuntimeSettings: vi.fn<() => Promise<void>>(async () => {}),
+      submitInput: vi.fn<() => Promise<void>>(async () => {}),
+      steer: vi.fn<() => Promise<void>>(async () => {}),
+      resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
+      compactThread: vi.fn<() => Promise<void>>(async () => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";
@@ -95,6 +101,12 @@ describe("POST /v1/desktop/launch", () => {
       launchApp: vi.fn<() => Promise<void>>(async () => {}),
       openThread: vi.fn<() => Promise<void>>(async () => {}),
       sendPrompt: vi.fn<() => Promise<void>>(async () => {}),
+      sendPromptWithOptions: vi.fn<() => Promise<void>>(async () => {}),
+      setRuntimeSettings: vi.fn<() => Promise<void>>(async () => {}),
+      submitInput: vi.fn<() => Promise<void>>(async () => {}),
+      steer: vi.fn<() => Promise<void>>(async () => {}),
+      resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
+      compactThread: vi.fn<() => Promise<void>>(async () => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";
@@ -185,6 +197,12 @@ describe("desktop session control APIs", () => {
       launchApp: vi.fn<() => Promise<void>>(async () => {}),
       openThread: vi.fn<() => Promise<void>>(async () => {}),
       sendPrompt: vi.fn<() => Promise<void>>(async () => {}),
+      sendPromptWithOptions: vi.fn<() => Promise<void>>(async () => {}),
+      setRuntimeSettings: vi.fn<() => Promise<void>>(async () => {}),
+      submitInput: vi.fn<() => Promise<void>>(async () => {}),
+      steer: vi.fn<() => Promise<void>>(async () => {}),
+      resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
+      compactThread: vi.fn<() => Promise<void>>(async () => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";
@@ -273,7 +291,7 @@ describe("desktop session control APIs", () => {
   });
 
   it("lists models from the local desktop catalog", async () => {
-    const { app } = createDesktopApp();
+    const { app, localDesktopControl } = createDesktopApp();
     await app.request("/v1/session-source", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -285,6 +303,7 @@ describe("desktop session control APIs", () => {
     await expect(response.json()).resolves.toMatchObject({
       models: [{ id: "gpt-5.5", model: "gpt-5.5", displayName: "GPT-5.5" }],
     });
+    expect(localDesktopControl.listModels).toHaveBeenCalledOnce();
   });
 
   it("runs pin and rename thread actions", async () => {
@@ -396,4 +415,112 @@ describe("desktop session control APIs", () => {
       rmSync(codexHome, { force: true, recursive: true });
     }
   }, 10_000);
+
+  it("submits desktop input and steer through IPC", async () => {
+    const { app, localDesktopControl } = createDesktopApp();
+    await app.request("/v1/session-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "desktop" }),
+    });
+    const createResponse = await app.request("/v1/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Desktop input", workspacePath: process.cwd() }),
+    });
+    const createBody = await createResponse.json();
+    const threadId = createBody.thread.id as string;
+
+    const inputResponse = await app.request(`/v1/threads/${threadId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "continue on desktop" }),
+    });
+    const inputBody = await inputResponse.json();
+
+    expect(inputResponse.status).toBe(202);
+    expect(localDesktopControl.submitInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "continue on desktop",
+        threadId,
+      }),
+    );
+
+    const steerResponse = await app.request(
+      `/v1/threads/${threadId}/input/${encodeURIComponent(inputBody.input.id)}/steer`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+
+    expect(steerResponse.status).toBe(202);
+    expect(localDesktopControl.steer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "continue on desktop",
+        threadId,
+      }),
+    );
+  });
+
+  it("continues a desktop thread as a new desktop conversation", async () => {
+    const { app, localDesktopControl } = createDesktopApp();
+    await app.request("/v1/session-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "desktop" }),
+    });
+    const createResponse = await app.request("/v1/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Desktop source", workspacePath: process.cwd() }),
+    });
+    const createBody = await createResponse.json();
+    const threadId = createBody.thread.id as string;
+
+    const continueResponse = await app.request(`/v1/threads/${threadId}/continue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "chat" }),
+    });
+
+    expect(continueResponse.status).toBe(201);
+    expect(localDesktopControl.newThread).toHaveBeenCalledWith({
+      scope: "conversation",
+      anchorThreadId: threadId,
+    });
+  });
+
+  it("archives a desktop thread through the desktop action path", async () => {
+    const { app, localDesktopControl } = createDesktopApp();
+    await app.request("/v1/session-source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source: "desktop" }),
+    });
+    const createResponse = await app.request("/v1/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Desktop archive", workspacePath: process.cwd() }),
+    });
+    const createBody = await createResponse.json();
+    const threadId = createBody.thread.id as string;
+
+    const deleteResponse = await app.request(`/v1/threads/${threadId}`, {
+      method: "DELETE",
+    });
+    const deleteBody = await deleteResponse.json();
+
+    expect(deleteResponse.status).toBe(200);
+    expect(deleteBody).toMatchObject({
+      archivedThreadId: threadId,
+      source: "local-desktop",
+    });
+    expect(localDesktopControl.threadAction).toHaveBeenCalledWith({
+      action: "archive",
+      threadId,
+      name: undefined,
+    });
+  });
 });

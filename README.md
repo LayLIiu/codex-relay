@@ -170,7 +170,9 @@ npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 W
 Relay 默认通过 Codex 桌面端本地的 `~/.codex/ipc/ipc.sock` 控制会话，不依赖 CDP：
 
 - 发送消息走 `thread-follower-start-turn`，新建会话用 `codex://threads/new` 深链加 `session_index` 读取新 ID。
-- 停止和模型/推理档位优先走桌面 IPC，失败才回退 macOS 自动化。
+- 停止、模型/推理档位、继续输入、steer 优先走桌面 IPC，失败才回退 macOS 自动化。
+- 模型列表、继续会话、归档、置顶、重命名也会同步回桌面会话和本地列表状态。
+- 桌面 IPC 完成时会触发移动端推送通知。
 - 只有显式设置 `CODEX_DESKTOP_USE_CDP=1` 或 `CODEX_DESKTOP_LAUNCH_MODE=cdp` 时，才使用仓库内置的 `tools/Codex CDP.app` 启动带本地调试接口的桌面端。
 
 ### 环境变量

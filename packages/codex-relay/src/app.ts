@@ -160,7 +160,11 @@ import {
   supportsCodexDesktop,
   type CodexDesktopControl,
 } from "./desktop-control.js";
-import { createLocalDesktopControl, type LocalDesktopControl } from "./local-desktop-control.js";
+import {
+  createLocalDesktopControl,
+  type DesktopPromptRuntimeOptions,
+  type LocalDesktopControl,
+} from "./local-desktop-control.js";
 import {
   classifyStreamEvent,
   createCodexClient,
@@ -936,7 +940,14 @@ export function createApp(options: AppOptions = {}) {
         action,
         name,
       });
-      if (action === "pin" || action === "unpin") {
+      if (action === "archive") {
+        updateLocalDesktopState((state) => ({
+          ...state,
+          archivedThreadIds: [...new Set([...state.archivedThreadIds, threadId])],
+        }));
+        threads.delete(threadId);
+        messagesByThreadId.delete(threadId);
+      } else if (action === "pin" || action === "unpin") {
         const pinned = action === "pin";
         updateLocalDesktopState((state) => ({
           ...state,
@@ -1756,6 +1767,34 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get(apiPaths.models, async (c) => {
+    if (sessionSource === "desktop" && localDesktopControl) {
+      try {
+        const models = localDesktopControl.listModels().map((model) => ({
+          id: model.id,
+          model: model.id,
+          displayName: model.displayName,
+          description: model.description,
+          isDefault: false,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low" },
+            { reasoningEffort: "medium" },
+            { reasoningEffort: "high" },
+            { reasoningEffort: "xhigh" },
+          ],
+          additionalSpeedTiers: [],
+          serviceTiers: [],
+        }));
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          ListModelsResponseSchema.parse({ models }),
+        );
+      } catch {
+        // 桌面模型目录读取失败时继续走 app-server/fallback。
+      }
+    }
     try {
       const models = appServer ? await appServer.listModels() : fallbackModels();
       return secureJson(
@@ -2146,10 +2185,17 @@ export function createApp(options: AppOptions = {}) {
     if (appServer) {
       try {
         const appServerThreads = await appServer.listThreads();
+        const appServerSummaries = appServerThreads
+          .filter((thread) => !isSubagentThread(thread))
+          .map((thread) => applyForceEndedThreadState(rememberAppServerThread(threads, thread)));
         const response: ListThreadsResponse = ListThreadsResponseSchema.parse({
-          threads: appServerThreads
-            .filter((thread) => !isSubagentThread(thread))
-            .map((thread) => applyForceEndedThreadState(rememberAppServerThread(threads, thread))),
+          threads:
+            sessionSource === "desktop" && localDesktopControl
+              ? mergeLocalDesktopIntoAppServerThreads(
+                  appServerSummaries,
+                  listLocalDesktopThreads(workspacePath),
+                )
+              : appServerSummaries,
           source: "app-server",
         });
         return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
@@ -2168,6 +2214,35 @@ export function createApp(options: AppOptions = {}) {
 
   app.delete("/v1/threads/:threadId", async (c) => {
     const threadId = c.req.param("threadId");
+    if (sessionSource === "desktop" && localDesktopControl) {
+      try {
+        await localDesktopControl.threadAction({ threadId, action: "archive" });
+        updateLocalDesktopState((state) => ({
+          ...state,
+          archivedThreadIds: [...new Set([...state.archivedThreadIds, threadId])],
+        }));
+        threads.delete(threadId);
+        messagesByThreadId.delete(threadId);
+        activeAppServerTurnIdsByThreadId.delete(threadId);
+        queuedInputsByThreadId.delete(threadId);
+        steeringThreads.delete(threadId);
+        forceEndedThreadIds.delete(threadId);
+        const response: ArchiveThreadResponse = ArchiveThreadResponseSchema.parse({
+          archivedThreadId: threadId,
+          threads: listLocalDesktopThreads(workspacePath),
+          source: "local-desktop",
+        });
+        return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+      } catch (error) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("desktop_archive_failed", errorMessage(error)),
+          502,
+        );
+      }
+    }
     if (appServer) {
       try {
         await appServer.archiveThread({ threadId });
@@ -3025,6 +3100,47 @@ export function createApp(options: AppOptions = {}) {
       knownThread.title,
       messagesByThreadId.get(threadId) ?? [],
     );
+    if (sessionSource === "desktop" && localDesktopControl) {
+      try {
+        const created = await localDesktopControl.newThread({
+          scope: "conversation",
+          anchorThreadId: threadId,
+        });
+        if (!created.threadId) {
+          throw new Error("桌面端新建会话后没有返回线程 ID");
+        }
+        const now = new Date().toISOString();
+        const continuedThread = ThreadSummarySchema.parse({
+          id: created.threadId,
+          title: parsed.data.title ?? continuedThreadTitle(knownThread.title, parsed.data.mode),
+          createdAt: now,
+          updatedAt: now,
+          state: "idle",
+          cwd: targetWorkspacePath,
+          source: "desktop",
+        });
+        threads.set(continuedThread.id, continuedThread);
+        messagesByThreadId.set(continuedThread.id, []);
+        const response: ContinueThreadResponse = ContinueThreadResponseSchema.parse({
+          continuationPrompt,
+          mode: parsed.data.mode,
+          sourceThreadId: threadId,
+          worktree: continuationWorktree,
+          workspacePath: targetWorkspacePath,
+          thread: continuedThread,
+          messages: [],
+        });
+        return secureJson(c, options.pairing, secureSessionsByTokenHash, response, 201);
+      } catch (error) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("desktop_continue_failed", errorMessage(error)),
+          500,
+        );
+      }
+    }
     const { threadId: continuedThreadId } = appServer
       ? await createAppServerThreadRecord({
           appServer,
@@ -3139,6 +3255,76 @@ export function createApp(options: AppOptions = {}) {
           apiError("not_found", `Thread ${threadId} is not known to this server.`),
           404,
         );
+      }
+      if (sessionSource === "desktop" && localDesktopControl) {
+        const parsed = await parseRequestJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          RunThreadRequestSchema,
+        );
+        if (!parsed.success) {
+          return secureJson(
+            c,
+            options.pairing,
+            secureSessionsByTokenHash,
+            validationError(parsed.error),
+            400,
+          );
+        }
+        const runOptions = withRuntimePreferences(
+          await preferences.read(knownThread.cwd ?? workspacePath),
+          parsed.data,
+        );
+        const prompt = runOptions.prompt;
+        if (!prompt) {
+          return secureJson(
+            c,
+            options.pairing,
+            secureSessionsByTokenHash,
+            apiError("invalid_request", "Desktop input requires a prompt."),
+            400,
+          );
+        }
+        try {
+          await localDesktopControl.submitInput({
+            threadId,
+            prompt,
+            options: desktopPromptOptions(runOptions),
+          });
+        } catch (error) {
+          return secureJson(
+            c,
+            options.pairing,
+            secureSessionsByTokenHash,
+            apiError("desktop_input_failed", `Desktop input failed: ${errorMessage(error)}`),
+            502,
+          );
+        }
+        const thread = updateThread(threads, messagesByThreadId, threadId, {
+          state: "running",
+          lastPrompt: promptWithAttachmentReferences(prompt, runOptions.attachments ?? []),
+          lastError: undefined,
+          ...runtimeMetadataFromOptions(runOptions),
+        });
+        const queuedInput: QueuedThreadInput = {
+          attachments: runOptions.attachments ?? [],
+          id: randomUUID(),
+          prompt,
+          runOptions,
+          skills: runOptions.skills ?? [],
+          workspacePath: knownThread.cwd ?? workspacePath,
+        };
+        const queuedInputs = queuedInputsByThreadId.get(threadId) ?? [];
+        queuedInputs.push(queuedInput);
+        queuedInputsByThreadId.set(threadId, queuedInputs);
+        const response: SubmitThreadInputResponse = SubmitThreadInputResponseSchema.parse({
+          acceptedAs: "queued",
+          input: queuedThreadInputSummary(queuedInput),
+          queueLength: queuedInputs.length,
+          thread,
+        });
+        return secureJson(c, options.pairing, secureSessionsByTokenHash, response, 202);
       }
       if (!appServer) {
         return secureJson(
@@ -3257,6 +3443,46 @@ export function createApp(options: AppOptions = {}) {
         apiError("not_found", `Thread ${threadId} is not known to this server.`),
         404,
       );
+    }
+    if (sessionSource === "desktop" && localDesktopControl) {
+      const queuedInput = removeQueuedInput(queuedInputsByThreadId, threadId, inputId);
+      if (!queuedInput) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("not_found", `Queued input ${inputId} is not known to this thread.`),
+          404,
+        );
+      }
+      try {
+        await localDesktopControl.steer({
+          threadId,
+          prompt: queuedInput.prompt,
+          options: desktopPromptOptions(queuedInput.runOptions),
+        });
+      } catch (error) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("desktop_steer_failed", `Desktop steer failed: ${errorMessage(error)}`),
+          502,
+        );
+      }
+      forceEndedThreadIds.delete(threadId);
+      steeringThreads.add(threadId);
+      const thread = updateThread(threads, messagesByThreadId, threadId, {
+        state: "running",
+        lastPrompt: promptWithAttachmentReferences(queuedInput.prompt, queuedInput.attachments),
+        lastError: undefined,
+      });
+      const response = QueuedThreadInputActionResponseSchema.parse({
+        input: queuedThreadInputSummary(queuedInput),
+        queueLength: queuedInputsByThreadId.get(threadId)?.length ?? 0,
+        thread,
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response, 202);
     }
     if (!appServer) {
       return secureJson(
@@ -3570,6 +3796,8 @@ export function createApp(options: AppOptions = {}) {
             localDesktopControl,
             messagesByThreadId,
             prompt: runOptions.prompt,
+            promptOptions: desktopPromptOptions(runOptions),
+            pushNotificationDispatcher,
             secureSession,
             threadId,
             threads,
@@ -3596,6 +3824,8 @@ export function createApp(options: AppOptions = {}) {
             localDesktopControl,
             messagesByThreadId,
             prompt: undefined,
+            promptOptions: undefined,
+            pushNotificationDispatcher,
             secureSession,
             threadId,
             threads,
@@ -4270,6 +4500,8 @@ async function runLocalDesktopPromptStreamed(input: {
   localDesktopControl: LocalDesktopControl;
   messagesByThreadId: Map<string, ChatMessage[]>;
   prompt?: string;
+  promptOptions?: DesktopPromptRuntimeOptions;
+  pushNotificationDispatcher?: PushNotificationDispatcher;
   secureSession?: SecureSessionHandle;
   threadId: string;
   threads: Map<string, ThreadMetadata>;
@@ -4312,9 +4544,10 @@ async function runLocalDesktopPromptStreamed(input: {
 
   if (input.prompt) {
     try {
-      await input.localDesktopControl.sendPrompt({
+      await input.localDesktopControl.sendPromptWithOptions({
         prompt: input.prompt,
         threadId: input.threadId,
+        options: input.promptOptions,
       });
     } catch (error) {
       threadSummary = updateThread(input.threads, input.messagesByThreadId, input.threadId, {
@@ -4360,6 +4593,12 @@ async function runLocalDesktopPromptStreamed(input: {
         thread: threadSummary,
       });
     }
+    void input.pushNotificationDispatcher
+      ?.dispatch({
+        intent: "turn_terminal",
+        threadId: input.threadId,
+      })
+      .catch(() => undefined);
     input.closeStream();
   };
   const timeout = setTimeout(finish, 1_800_000);
@@ -7212,6 +7451,18 @@ function withRuntimePreferences<T extends RuntimeOptionSubset>(
   };
 }
 
+function desktopPromptOptions(options: RuntimeOptionSubset): DesktopPromptRuntimeOptions {
+  return {
+    approvalPolicy: options.approvalPolicy,
+    collaborationMode: options.collaborationMode,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    runtimeMode: options.runtimeMode,
+    sandboxMode: options.sandboxMode,
+    serviceTier: options.serviceTier,
+  };
+}
+
 function resolveRuntimeOptions(
   runtimeMode: RuntimeMode | undefined,
 ): Parameters<CodexClient["startThread"]>[0] {
@@ -7947,6 +8198,35 @@ function listLocalDesktopThreads(workspacePath = defaultWorkspacePath): ThreadSu
         b.updatedAt.localeCompare(a.updatedAt),
     )
     .slice(0, maxDesktopThreadList);
+}
+
+function mergeLocalDesktopIntoAppServerThreads(
+  appServerThreads: ThreadSummary[],
+  desktopThreads: ThreadSummary[],
+): ThreadSummary[] {
+  const byId = new Map(appServerThreads.map((thread) => [thread.id, thread]));
+  for (const desktopThread of desktopThreads) {
+    const existing = byId.get(desktopThread.id);
+    if (!existing) {
+      byId.set(desktopThread.id, desktopThread);
+      continue;
+    }
+    if (desktopThread.pinned || existing.title === "Codex thread") {
+      byId.set(
+        desktopThread.id,
+        ThreadSummarySchema.parse({
+          ...existing,
+          pinned: existing.pinned || desktopThread.pinned,
+          title: existing.title === "Codex thread" ? desktopThread.title : existing.title,
+        }),
+      );
+    }
+  }
+  return [...byId.values()].sort(
+    (left, right) =>
+      Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) ||
+      right.updatedAt.localeCompare(left.updatedAt),
+  );
 }
 
 async function ensureLocalDesktopThread(input: {

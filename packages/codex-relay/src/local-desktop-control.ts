@@ -30,12 +30,50 @@ export type LocalDesktopModel = {
   source: "local";
 };
 
+export type DesktopPromptRuntimeOptions = {
+  approvalPolicy?: string;
+  collaborationMode?: unknown;
+  model?: string;
+  reasoningEffort?: string;
+  runtimeMode?: string;
+  sandboxMode?: string;
+  serviceTier?: string;
+};
+
 export type LocalDesktopControl = {
   ensureAvailable(): Promise<void>;
   isAvailable(): Promise<boolean>;
   launchApp(): Promise<void>;
   openThread(threadId: string): Promise<void>;
   sendPrompt(input: { prompt: string; threadId: string }): Promise<void>;
+  sendPromptWithOptions(input: {
+    prompt: string;
+    threadId: string;
+    options?: DesktopPromptRuntimeOptions;
+  }): Promise<void>;
+  setRuntimeSettings(input: {
+    threadId: string;
+    options?: DesktopPromptRuntimeOptions;
+  }): Promise<void>;
+  submitInput(input: {
+    threadId: string;
+    prompt: string;
+    options?: DesktopPromptRuntimeOptions;
+  }): Promise<void>;
+  steer(input: {
+    threadId: string;
+    prompt: string;
+    expectedTurnId?: string;
+    options?: DesktopPromptRuntimeOptions;
+  }): Promise<void>;
+  resolveApproval(input: {
+    threadId: string;
+    requestId: string;
+    approvalKind?: "command" | "file" | "permissions" | "input";
+    decision: "accept" | "acceptForSession" | "decline" | "cancel";
+    answers?: string[];
+  }): Promise<void>;
+  compactThread(threadId: string): Promise<void>;
   newThread(input?: {
     scope?: "conversation" | "project";
     workspacePath?: string;
@@ -432,7 +470,25 @@ export function createLocalDesktopControl(
   }
 
   async function sendPrompt(input: { prompt: string; threadId: string }) {
+    return sendPromptWithOptions(input);
+  }
+
+  async function sendPromptWithOptions(input: {
+    prompt: string;
+    threadId: string;
+    options?: DesktopPromptRuntimeOptions;
+  }) {
     try {
+      if (input.options) {
+        try {
+          await setRuntimeSettings({ threadId: input.threadId, options: input.options });
+        } catch (settingsError) {
+          relayDebugLog("desktop.ipc_settings_failed", {
+            message: errorMessage(settingsError),
+            threadId: input.threadId,
+          });
+        }
+      }
       await sendPromptViaDesktopIpc(input);
       return;
     } catch (ipcError) {
@@ -475,7 +531,107 @@ export function createLocalDesktopControl(
     }
   }
 
-  async function sendPromptViaDesktopIpc(input: { prompt: string; threadId: string }) {
+  async function setRuntimeSettings(input: {
+    threadId: string;
+    options?: DesktopPromptRuntimeOptions;
+  }) {
+    const options = input.options ?? {};
+    await desktopIpc.sendRequest("thread-follower-update-thread-settings", {
+      conversationId: input.threadId,
+      threadSettings: {
+        model: options.model?.trim() || null,
+        effort: options.reasoningEffort?.trim() || null,
+        serviceTier: options.serviceTier?.trim() || null,
+        ...(options.collaborationMode !== undefined
+          ? { collaborationMode: options.collaborationMode }
+          : {}),
+      },
+    });
+  }
+
+  async function submitInput(input: {
+    threadId: string;
+    prompt: string;
+    options?: DesktopPromptRuntimeOptions;
+  }) {
+    if (input.options) {
+      try {
+        await setRuntimeSettings({ threadId: input.threadId, options: input.options });
+      } catch (settingsError) {
+        relayDebugLog("desktop.ipc_settings_failed", {
+          message: errorMessage(settingsError),
+          threadId: input.threadId,
+        });
+      }
+    }
+    await desktopIpc.sendRequest("thread-follower-steer-turn", {
+      conversationId: input.threadId,
+      input: [{ type: "text", text: input.prompt }],
+      expectedTurnId: null,
+    });
+  }
+
+  async function steer(input: {
+    threadId: string;
+    prompt: string;
+    expectedTurnId?: string;
+    options?: DesktopPromptRuntimeOptions;
+  }) {
+    if (input.options) {
+      try {
+        await setRuntimeSettings({ threadId: input.threadId, options: input.options });
+      } catch (settingsError) {
+        relayDebugLog("desktop.ipc_settings_failed", {
+          message: errorMessage(settingsError),
+          threadId: input.threadId,
+        });
+      }
+    }
+    await desktopIpc.sendRequest("thread-follower-steer-turn", {
+      conversationId: input.threadId,
+      input: [{ type: "text", text: input.prompt }],
+      expectedTurnId: input.expectedTurnId ?? null,
+    });
+  }
+
+  async function resolveApproval(input: {
+    threadId: string;
+    requestId: string;
+    approvalKind?: "command" | "file" | "permissions" | "input";
+    decision: "accept" | "acceptForSession" | "decline" | "cancel";
+    answers?: string[];
+  }) {
+    if (input.approvalKind === "input") {
+      await desktopIpc.sendRequest("thread-follower-submit-user-input", {
+        conversationId: input.threadId,
+        requestId: input.requestId,
+        response: { answers: input.answers ?? [] },
+      });
+      return;
+    }
+    const method =
+      input.approvalKind === "file" || input.approvalKind === "permissions"
+        ? "thread-follower-file-approval-decision"
+        : "thread-follower-command-approval-decision";
+    await desktopIpc.sendRequest(method, {
+      conversationId: input.threadId,
+      requestId: input.requestId,
+      decision: input.decision,
+    });
+  }
+
+  async function compactThread(threadId: string) {
+    await desktopIpc.sendRequest("thread-follower-compact-thread", {
+      conversationId: threadId,
+    });
+  }
+
+  async function sendPromptViaDesktopIpc(input: {
+    prompt: string;
+    threadId: string;
+    options?: DesktopPromptRuntimeOptions;
+  }) {
+    const options = input.options ?? {};
     await desktopIpc.sendRequest("thread-follower-start-turn", {
       conversationId: input.threadId,
       senderRequestId: randomUUID(),
@@ -483,6 +639,17 @@ export function createLocalDesktopControl(
         threadId: input.threadId,
         input: [{ type: "text", text: input.prompt }],
         cwd: env.CODEX_RELAY_WORKSPACE_PATH || process.cwd(),
+        ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+        ...(options.reasoningEffort?.trim() ? { effort: options.reasoningEffort.trim() } : {}),
+        ...(options.serviceTier?.trim() ? { serviceTier: options.serviceTier.trim() } : {}),
+        ...(options.runtimeMode?.trim() ? { runtimeMode: options.runtimeMode.trim() } : {}),
+        ...(options.approvalPolicy?.trim()
+          ? { approvalPolicy: options.approvalPolicy.trim() }
+          : {}),
+        ...(options.sandboxMode?.trim() ? { sandboxMode: options.sandboxMode.trim() } : {}),
+        ...(options.collaborationMode !== undefined
+          ? { collaborationMode: options.collaborationMode }
+          : {}),
       },
     });
   }
@@ -851,6 +1018,12 @@ end tell
     launchApp,
     openThread,
     sendPrompt,
+    sendPromptWithOptions,
+    setRuntimeSettings,
+    submitInput,
+    steer,
+    resolveApproval,
+    compactThread,
     newThread,
     stop,
     selectModel,
