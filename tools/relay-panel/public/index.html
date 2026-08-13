@@ -68,6 +68,7 @@
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn.start { background: #1f9d5a; }
     .btn.stop { background: #c04a4a; }
+    .btn.build { background: #3a6ef0; }
 
     .qr-wrap {
       display: flex;
@@ -195,6 +196,7 @@
       <div class="actions">
         <button class="btn start" id="btnStart">🚀 启动服务</button>
         <button class="btn stop" id="btnStop">⏹ 停止服务</button>
+        <button class="btn build" id="btnBuild">🔨 构建并重启</button>
       </div>
       <div class="message" id="startMsg"></div>
     </div>
@@ -328,6 +330,22 @@
         showMessage("startMsg", "停止失败：" + error.message, true);
       }
       refreshStatus();
+    });
+
+    $("btnBuild").addEventListener("click", async () => {
+      showMessage("startMsg", "正在构建并重启，请稍候...");
+      $("btnBuild").disabled = true;
+      try {
+        const res = await fetch("/api/build-restart", { method: "POST" });
+        const data = await res.json();
+        showMessage("startMsg", data.message || (data.ok ? "完成" : "失败"), !data.ok);
+        setStatus(data.relayRunning);
+      } catch (error) {
+        showMessage("startMsg", "构建重启失败：" + error.message, true);
+      } finally {
+        $("btnBuild").disabled = false;
+        refreshStatus();
+      }
     });
 
     $("btnApprove").addEventListener("click", async () => {

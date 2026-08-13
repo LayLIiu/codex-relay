@@ -1,4 +1,5 @@
 import { platform as currentPlatform } from "node:os";
+import { existsSync } from "node:fs";
 import { extname } from "node:path";
 
 const stdioAppServerArgs = ["app-server", "--listen", "stdio://"] as const;
@@ -19,7 +20,7 @@ export type CodexAppServerSpawnInput = {
   readonly platform?: CodexSpawnPlatform;
 };
 
-export type CodexAppServerMode = "stdio" | "socket";
+export type CodexAppServerMode = "stdio" | "socket" | "desktop";
 
 export type CodexAppServerModeResolution = {
   readonly fallbackToStdio: boolean;
@@ -85,8 +86,23 @@ export function resolveCodexSharedAppServerRemoteAddress(
   return platform === "win32" ? sharedWindowsServerUrl : "unix://";
 }
 
-function resolveCodexBinary(env: NodeJS.ProcessEnv) {
+export function resolveCodexBinary(env: NodeJS.ProcessEnv) {
   return env.CODEX_BIN?.trim() || "codex";
+}
+
+export function resolveCodexDesktopBinary(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = currentPlatform(),
+) {
+  const explicit = env.CODEX_DESKTOP_BIN?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const bundledDesktopBinary = "/Applications/ChatGPT.app/Contents/Resources/codex";
+  if (platform === "darwin" && existsSync(bundledDesktopBinary)) {
+    return bundledDesktopBinary;
+  }
+  return resolveCodexBinary(env);
 }
 
 function shouldUseWindowsShell(command: string) {

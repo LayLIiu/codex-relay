@@ -138,6 +138,59 @@ describe("CodexAppServerClient startup mode", () => {
       await rm(codexHome, { force: true, recursive: true });
     }
   }, 12_000);
+
+  it("switches to a shared desktop daemon after preparing its control socket", async () => {
+    // Given: a relay client without an existing shared socket.
+    const codexHome = await mkdtemp(join(socketTempRoot, "codex-relay-desktop-app-server-"));
+    const socketPath = join(codexHome, "app-server-control", "app-server-control.sock");
+    vi.stubEnv("CODEX_HOME", codexHome);
+    const client = new CodexAppServerClient({
+      mode: { fallbackToStdio: true, mode: "socket" },
+      startSharedServer: async () => undefined,
+    });
+    let sharedServer: SharedSocketServer | undefined;
+    const prepare = vi.fn<() => Promise<void>>(async () => {
+      sharedServer = await startSharedSocketServer(socketPath);
+    });
+
+    try {
+      // When: the client switches to the desktop app-server after preparing its daemon.
+      await client.switchToSharedDesktopServer(prepare);
+
+      // Then: it attaches to the prepared daemon instead of starting a relay-owned server.
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(client.appServerMode).toBe("socket");
+      expect(client.ownership).toBe("attached");
+    } finally {
+      client.close();
+      if (sharedServer) {
+        await sharedServer.close();
+      }
+      await rm(codexHome, { force: true, recursive: true });
+    }
+  });
+
+  it("switches back to a private CLI stdio app-server", async () => {
+    const codexHome = await mkdtemp(join(socketTempRoot, "codex-relay-cli-app-server-"));
+    const fakeCodexBinary = join(codexHome, "fake-codex");
+    await writeFakeStdioCodexBinary(fakeCodexBinary);
+    vi.stubEnv("CODEX_BIN", fakeCodexBinary);
+    vi.stubEnv("CODEX_HOME", codexHome);
+    const client = new CodexAppServerClient({
+      mode: { fallbackToStdio: false, mode: "socket" },
+      startSharedServer: async () => undefined,
+    });
+
+    try {
+      await client.switchToCliServer();
+
+      expect(client.appServerMode).toBe("stdio");
+      expect(client.ownership).toBe("stdio");
+    } finally {
+      client.close();
+      await rm(codexHome, { force: true, recursive: true });
+    }
+  });
 });
 
 async function startSharedSocketServer(socketPath: string): Promise<SharedSocketServer> {

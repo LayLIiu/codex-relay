@@ -150,6 +150,11 @@ The relay listens on `0.0.0.0:8787` by default. Configure it with environment va
 | `CODEX_RELAY_HMS_SERVICE_ACCOUNT_JSON` | Inline Huawei Push Kit service-account JSON. Use only when a protected secret store cannot mount a file.                                                       |
 | `CODEX_HOME`                           | Codex home directory, used when reading Codex session metadata.                                                                                                 |
 | `CODEX_BIN`                            | Codex CLI executable path.                                                                                                                                      |
+| `CODEX_DESKTOP_BIN`                    | Codex Desktop executable path. Defaults to the ChatGPT.app bundled binary when present.                                                                          |
+| `CODEX_DESKTOP_APP_PATH`               | Codex/ChatGPT desktop app bundle path used for official Remote Control device keys.                                                                              |
+| `CODEX_DESKTOP_CDP_PORT`               | Local Codex Desktop CDP debug port used by the local desktop bridge.                                                                                              |
+| `CODEX_DESKTOP_BUNDLE_ID`              | Codex desktop app bundle identifier used for deeplink activation.                                                                                                |
+| `CODEX_DESKTOP_CDP_LAUNCHER_APP`       | Codex CDP launcher app bundle path.                                                                                                                               |
 
 Examples:
 

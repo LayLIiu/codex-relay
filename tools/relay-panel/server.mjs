@@ -2,12 +2,15 @@
 // Codex Relay 控制面板后端：一键启动 17878 服务、展示配对二维码、批准设备配对。
 // 用法：node tools/relay-panel/server.mjs   然后浏览器打开 http://127.0.0.1:7800
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 7800);
 const RELAY_PORT = Number(process.env.RELAY_PORT ?? 17878);
@@ -127,6 +130,51 @@ function stopRelay() {
   }, 3000).unref();
   appendLog("[正在停止服务...]");
   return { ok: true };
+}
+
+async function buildAndRestartRelay() {
+  const results = [];
+
+  // 1. 重新构建服务端 dist（仅项目源码环境有 tsdown）
+  const tsdownBin = resolve(REPO_ROOT, "node_modules", ".bin", "tsdown");
+  const hasTsdown = await readFile(tsdownBin).then(() => true).catch(() => false);
+  if (hasTsdown) {
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        "/opt/homebrew/bin/node",
+        [tsdownBin],
+        {
+          cwd: resolve(REPO_ROOT, "packages", "codex-relay"),
+          env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH ?? ""}` },
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      );
+      results.push(`✅ 构建成功\n${(stdout + stderr).trim()}`);
+    } catch (error) {
+      return { ok: false, message: `❌ 构建失败：${error.stderr || error.message}` };
+    }
+  } else {
+    results.push("⚠️ 未找到 tsdown（桌面版环境跳过构建）");
+  }
+
+  // 2. 重启服务：优先 launchd 托管，否则重启面板启动的进程
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid !== undefined) {
+    try {
+      await execFileAsync("launchctl", ["kickstart", "-k", `gui/${uid}/com.codexrelay.project`]);
+      results.push("✅ 已通过 launchd 重启服务");
+    } catch (error) {
+      results.push(`⚠️ launchd 重启失败：${error.message}，改用面板内重启`);
+      stopRelay();
+      startRelay();
+      results.push("✅ 已在面板内重启服务");
+    }
+  } else {
+    stopRelay();
+    startRelay();
+    results.push("✅ 已在面板内重启服务");
+  }
+  return { ok: true, message: results.join("\n") };
 }
 
 async function readApprovalSecret() {
@@ -297,6 +345,14 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         message: result.alreadyStopped ? "服务未在运行" : "服务已停止",
+        ...(await status()),
+      });
+    }
+
+    if (req.method === "POST" && path === "/api/build-restart") {
+      const result = await buildAndRestartRelay();
+      return sendJson(res, result.ok ? 200 : 400, {
+        ...result,
         ...(await status()),
       });
     }

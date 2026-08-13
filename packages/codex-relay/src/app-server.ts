@@ -15,6 +15,11 @@ import {
   type CodexAppServerModeResolution,
 } from "./codex-binary.js";
 import { relayDebugLog } from "./debug-log.js";
+import {
+  createOfficialDesktopRemoteControlTransport,
+  waitForOfficialDesktopRemoteControl,
+  type OfficialDesktopRemoteControlTransport,
+} from "./desktop/official-remote-control.js";
 
 type JsonRpcServerMessage = {
   id?: number;
@@ -38,7 +43,7 @@ type SharedAppServerOwnership = "attached" | "relay-owned";
 export type CodexAppServerClientOptions = {
   readonly mode?: CodexAppServerModeResolution;
   readonly onStartupFallback?: (error: Error) => void;
-  readonly startSharedServer?: () => Promise<ChildProcessWithoutNullStreams>;
+  readonly startSharedServer?: () => Promise<ChildProcessWithoutNullStreams | undefined>;
 };
 
 const sharedSocketReconnectDelaysMs = [50, 100, 250, 500, 1_000, 2_000] as const;
@@ -267,6 +272,7 @@ export class CodexAppServerClient {
   private activeMode: CodexAppServerMode;
   private child: ChildProcessWithoutNullStreams | undefined;
   private closed = false;
+  private desktopTransport: OfficialDesktopRemoteControlTransport | undefined;
   private fallbackToStdio: boolean;
   private initialized: Promise<void> | undefined;
   private notificationHandlers = new Set<(notification: AppServerNotification) => void>();
@@ -279,7 +285,7 @@ export class CodexAppServerClient {
   private sharedServer: ChildProcessWithoutNullStreams | undefined;
   private socket: WebSocket | undefined;
   private readonly onStartupFallback: ((error: Error) => void) | undefined;
-  private readonly startSharedServer: () => Promise<ChildProcessWithoutNullStreams>;
+  private startSharedServer: () => Promise<ChildProcessWithoutNullStreams | undefined>;
 
   constructor(options: CodexAppServerClientOptions = {}) {
     const mode = options.mode ?? resolveCodexAppServerMode();
@@ -293,8 +299,83 @@ export class CodexAppServerClient {
     return this.activeMode;
   }
 
+  get ownership(): "attached" | "relay-owned" | "stdio" | "unavailable" {
+    if (this.activeMode === "desktop") {
+      return this.desktopTransport?.isStarted() ? "attached" : "unavailable";
+    }
+    if (this.activeMode === "stdio") {
+      return "stdio";
+    }
+    if (this.sharedServer) {
+      return "relay-owned";
+    }
+    return this.socket ? "attached" : "unavailable";
+  }
+
   initialize() {
     return this.ensureInitialized();
+  }
+
+  async switchToSharedDesktopServer(prepare: () => Promise<void> = async () => {}) {
+    if (this.closed) {
+      throw new Error("Codex app-server was closed.");
+    }
+
+    const alreadyAttachedToSharedDaemon =
+      this.activeMode === "socket" && Boolean(this.socket) && !this.sharedServer;
+    if (!alreadyAttachedToSharedDaemon) {
+      this.stopForDesktopSwitch();
+      this.activeMode = "socket";
+      this.fallbackToStdio = false;
+    }
+
+    const previousStartSharedServer = this.startSharedServer;
+    this.startSharedServer = async () => {
+      await prepare();
+      return undefined;
+    };
+    try {
+      await this.startOrAttachSharedCodexAppServer();
+      await this.initializeAppServer();
+      this.fallbackToStdio = false;
+      this.sharedReconnectEnabled = true;
+    } finally {
+      this.startSharedServer = previousStartSharedServer;
+    }
+  }
+
+  async switchToCliServer() {
+    if (this.closed) {
+      throw new Error("Codex app-server was closed.");
+    }
+    await this.stopForDesktopSwitchAsync();
+    this.activeMode = "stdio";
+    this.fallbackToStdio = false;
+    this.initialized = undefined;
+    await this.startAndInitializeStdioCodexAppServer();
+  }
+
+  async detachForDesktop() {
+    if (this.closed) {
+      return;
+    }
+    await this.stopForDesktopSwitchAsync();
+    this.activeMode = "desktop";
+    this.fallbackToStdio = false;
+    this.initialized = undefined;
+  }
+
+  async switchToOfficialDesktopServer() {
+    if (this.closed) {
+      throw new Error("Codex app-server was closed.");
+    }
+    await this.stopForDesktopSwitchAsync();
+    this.activeMode = "desktop";
+    this.fallbackToStdio = false;
+    this.initialized = undefined;
+    const initialized = this.startDesktopTransport();
+    this.initialized = initialized;
+    await initialized;
   }
 
   async listThreads(limit = 80) {
@@ -395,6 +476,8 @@ export class CodexAppServerClient {
       pending.reject(new Error("Codex app-server was closed."));
     }
     this.pending.clear();
+    this.desktopTransport?.shutdown();
+    this.desktopTransport = undefined;
     this.stopStdioCodexAppServer();
     this.stopSharedCodexAppServer();
     this.initialized = undefined;
@@ -435,6 +518,10 @@ export class CodexAppServerClient {
       await this.startAndInitializeStdioCodexAppServer();
       return;
     }
+    if (this.activeMode === "desktop") {
+      await this.startDesktopTransport();
+      return;
+    }
 
     try {
       await this.startOrAttachSharedCodexAppServer();
@@ -454,6 +541,35 @@ export class CodexAppServerClient {
       this.onStartupFallback?.(sharedError);
       await this.startAndInitializeStdioCodexAppServer();
     }
+  }
+
+  private async startDesktopTransport() {
+    const transport = createOfficialDesktopRemoteControlTransport();
+    this.desktopTransport = transport;
+    transport.onMessage((message) => this.handleLine(message));
+    transport.onError((error) => {
+      relayDebugLog("app_server.desktop_transport.error", { message: error.message });
+      this.rejectAll(error);
+    });
+    transport.onClose((code, reason) => {
+      relayDebugLog("app_server.desktop_transport.closed", { code, reason });
+      this.rejectAll(new Error(`Codex Desktop Remote Control closed: ${code} ${reason}`.trim()));
+    });
+    await transport.connect();
+    await waitForOfficialDesktopRemoteControl(transport);
+    await this.requestRaw("initialize", {
+      clientInfo: {
+        name: "codex-relay",
+        title: "Codex Relay Mobile Server",
+        version: "1.2.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+        optOutNotificationMethods: [],
+      },
+    });
+    await this.writeJson({ jsonrpc: "2.0", method: "initialized" });
   }
 
   private async startAndInitializeStdioCodexAppServer() {
@@ -517,6 +633,42 @@ export class CodexAppServerClient {
     this.sharedServer = undefined;
   }
 
+  private stopForDesktopSwitch() {
+    this.rejectAll(new Error("Switching Codex app-server to the Desktop daemon."));
+    this.desktopTransport?.shutdown();
+    this.desktopTransport = undefined;
+    this.stopSharedCodexAppServer();
+    this.stopStdioCodexAppServer();
+    this.initialized = undefined;
+  }
+
+  private async stopForDesktopSwitchAsync() {
+    this.rejectAll(new Error("Switching Codex app-server to the Desktop daemon."));
+    this.desktopTransport?.shutdown();
+    this.desktopTransport = undefined;
+    const sharedServer = this.sharedServer;
+    const stdioChild = this.child;
+    this.stopSharedCodexAppServer();
+    this.stopStdioCodexAppServer();
+    await Promise.all([this.waitForChildExit(sharedServer), this.waitForChildExit(stdioChild)]);
+    this.initialized = undefined;
+  }
+
+  private async waitForChildExit(child: ChildProcessWithoutNullStreams | undefined) {
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+    const exited = new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+    });
+    child.kill("SIGTERM");
+    await Promise.race([exited, setTimeout(3_000)]);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([exited, setTimeout(2_000)]);
+    }
+  }
+
   private async startOrAttachSharedCodexAppServer() {
     try {
       await this.connectSharedCodexAppServer();
@@ -537,17 +689,19 @@ export class CodexAppServerClient {
     }
 
     const sharedServer = await this.startSharedServer();
-    this.sharedServer = sharedServer;
-    this.observeSharedCodexAppServer(sharedServer);
+    if (sharedServer) {
+      this.sharedServer = sharedServer;
+      this.observeSharedCodexAppServer(sharedServer);
+    }
     relayDebugLog("app_server.shared_process.started", {
-      ownership: "relay-owned",
+      ownership: sharedServer ? "relay-owned" : "attached",
       socketPath: sharedCodexAppServerSocketPath(),
     });
     try {
       await this.connectSharedCodexAppServer();
     } catch (error) {
       if (this.sharedServer === sharedServer) {
-        sharedServer.kill();
+        sharedServer?.kill();
         this.sharedServer = undefined;
       }
       throw error;
@@ -773,6 +927,15 @@ export class CodexAppServerClient {
 
   private writeSerializedJson(payload: string) {
     return new Promise<void>((resolve, reject) => {
+      if (this.desktopTransport) {
+        try {
+          this.desktopTransport.send(payload);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
       if (this.socket) {
         this.socket.send(payload, (error) => {
           if (error) {

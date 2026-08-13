@@ -1,0 +1,34 @@
+#!/bin/zsh
+set -euo pipefail
+
+SOURCE_APP="${CODEX_DESKTOP_APP_PATH:-/Applications/ChatGPT.app}"
+CDP_PORT="${CODEX_DESKTOP_CDP_PORT:-39252}"
+CDP_ADDRESS="${CODEX_DESKTOP_CDP_ADDRESS:-127.0.0.1}"
+
+if curl -fsS "http://${CDP_ADDRESS}:${CDP_PORT}/json/list" >/dev/null 2>&1; then
+  exit 0
+fi
+
+if /usr/bin/pgrep -f "${SOURCE_APP}/Contents/MacOS/ChatGPT" >/dev/null 2>&1; then
+  /usr/bin/osascript -e 'display dialog "请先退出原版 ChatGPT/Codex，再启动 Codex CDP。原版没有被自动关闭。" buttons {"好"} default button "好"' >/dev/null 2>&1 || true
+  exit 1
+fi
+
+/usr/bin/open -a "$SOURCE_APP" --args \
+  "--remote-debugging-address=${CDP_ADDRESS}" \
+  "--remote-debugging-port=${CDP_PORT}" \
+  "--remote-allow-origins=http://${CDP_ADDRESS}:${CDP_PORT}" \
+  "--disable-background-timer-throttling" \
+  "--disable-renderer-backgrounding" \
+  "--disable-backgrounding-occluded-windows" \
+  "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling"
+
+for attempt in {1..50}; do
+  if curl -fsS "http://127.0.0.1:${CDP_PORT}/json/list" >/dev/null 2>&1; then
+    exit 0
+  fi
+  /bin/sleep 0.3
+done
+
+/usr/bin/osascript -e 'display dialog "Codex CDP 已启动，但调试端口还未就绪。请稍后检查。" buttons {"好"} default button "好"' >/dev/null 2>&1 || true
+exit 2

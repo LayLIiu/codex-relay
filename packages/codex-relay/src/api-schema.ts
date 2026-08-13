@@ -109,7 +109,12 @@ const ExpoPushTokenSchema = z
   .trim()
   .regex(/^(?:Expo|Exponent)PushToken\[[^\]\r\n]{1,512}\]$/);
 
-const HmsPushTokenSchema = z.string().trim().min(1).max(4096).regex(/^[^\s\r\n]+$/);
+const HmsPushTokenSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4096)
+  .regex(/^[^\s\r\n]+$/);
 
 const ExpoPushNotificationRegistrationSchema = z.object({
   provider: z.literal("expo"),
@@ -350,6 +355,7 @@ export const ThreadSummarySchema = z.object({
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
   state: ThreadStateSchema,
+  pinned: z.boolean().optional(),
   model: z.string().optional(),
   serviceTier: z.string().optional(),
   runtimeMode: RuntimeModeSchema.optional(),
@@ -368,6 +374,8 @@ export const ThreadSummarySchema = z.object({
   goal: ThreadGoalSchema.nullable().optional(),
 });
 
+export const SessionSourceSchema = z.enum(["cli", "desktop"]);
+
 export const StatusResponseSchema = z.object({
   ok: z.boolean(),
   service: z.literal("codex-relay-server"),
@@ -376,8 +384,54 @@ export const StatusResponseSchema = z.object({
   workspacePath: z.string(),
   threadCount: z.number().int().nonnegative(),
   appServerAvailable: z.boolean().default(false),
+  appServerOwnership: z
+    .enum(["attached", "relay-owned", "stdio", "unavailable"])
+    .default("unavailable"),
+  desktopControlSupported: z.boolean().default(false),
+  sessionSource: SessionSourceSchema.default("cli"),
   preferences: RuntimePreferencesSchema.default({ runtimeMode: "default" }),
   runtimePreferencesByWorkspacePath: RuntimePreferencesByWorkspacePathSchema.default({}),
+});
+
+export const DesktopLaunchRequestSchema = z.object({
+  workspacePath: z.string().trim().min(1).optional(),
+});
+
+export const DesktopLaunchResponseSchema = z.object({
+  ok: z.literal(true),
+  launched: z.boolean(),
+  codexBinary: z.string().min(1),
+  workspacePath: z.string().min(1),
+  appServerMode: z.enum(["stdio", "socket", "desktop"]).optional(),
+  appServerOwnership: z.enum(["attached", "relay-owned", "stdio", "unavailable"]),
+});
+
+export const SessionSourceRequestSchema = z.object({
+  source: SessionSourceSchema,
+});
+
+export const SessionSourceResponseSchema = z.object({
+  ok: z.literal(true),
+  source: SessionSourceSchema,
+  appServerMode: z.enum(["stdio", "socket", "desktop"]).optional(),
+  appServerOwnership: z.enum(["attached", "relay-owned", "stdio", "unavailable"]),
+  desktopControlSupported: z.boolean(),
+});
+
+export const DesktopThreadActionSchema = z.enum(["archive", "pin", "unpin", "rename"]);
+
+export const DesktopThreadActionRequestSchema = z.object({
+  threadId: z.string().trim().min(1),
+  action: DesktopThreadActionSchema,
+  name: z.string().trim().max(120).optional(),
+});
+
+export const DesktopThreadActionResponseSchema = z.object({
+  ok: z.literal(true),
+  action: DesktopThreadActionSchema,
+  threadId: z.string().min(1),
+  name: z.string().max(120).optional(),
+  message: z.string().min(1),
 });
 
 export const WorkspaceDirectoryEntrySchema = z.object({
@@ -751,13 +805,13 @@ export const ResolveApprovalResponseSchema = z.object({
 
 export const ListThreadsResponseSchema = z.object({
   threads: z.array(ThreadSummarySchema),
-  source: z.enum(["app-server", "memory"]).default("memory"),
+  source: z.enum(["app-server", "memory", "local-desktop"]).default("memory"),
 });
 
 export const ArchiveThreadResponseSchema = z.object({
   archivedThreadId: z.string().min(1),
   threads: z.array(ThreadSummarySchema),
-  source: z.enum(["app-server", "memory"]).default("memory"),
+  source: z.enum(["app-server", "memory", "local-desktop"]).default("memory"),
 });
 
 export const ListModelsResponseSchema = z.object({
@@ -873,6 +927,13 @@ export type ThreadContextWindowResponse = z.infer<typeof ThreadContextWindowResp
 export type ThreadGoal = z.infer<typeof ThreadGoalSchema>;
 export type ThreadGoalResponse = z.infer<typeof ThreadGoalResponseSchema>;
 export type ThreadGoalStatus = z.infer<typeof ThreadGoalStatusSchema>;
+export type DesktopLaunchRequest = z.infer<typeof DesktopLaunchRequestSchema>;
+export type DesktopLaunchResponse = z.infer<typeof DesktopLaunchResponseSchema>;
+export type SessionSource = z.infer<typeof SessionSourceSchema>;
+export type SessionSourceRequest = z.infer<typeof SessionSourceRequestSchema>;
+export type SessionSourceResponse = z.infer<typeof SessionSourceResponseSchema>;
+export type DesktopThreadActionRequest = z.infer<typeof DesktopThreadActionRequestSchema>;
+export type DesktopThreadActionResponse = z.infer<typeof DesktopThreadActionResponseSchema>;
 export type PromptAttachment = z.infer<typeof PromptAttachmentSchema>;
 export type PendingInputRequest = z.infer<typeof PendingInputRequestSchema>;
 export type PendingInputRequestQuestion = z.infer<typeof PendingInputRequestQuestionSchema>;
@@ -1149,6 +1210,9 @@ export const apiPaths = {
   sessionsClear: "/v1/sessions/clear",
   sessionRefresh: "/v1/session/refresh",
   status: "/v1/status",
+  desktopLaunch: "/v1/desktop/launch",
+  sessionSource: "/v1/session-source",
+  desktopThreadAction: "/v1/desktop/thread-action",
   preferences: "/v1/preferences",
   pushNotifications: "/v1/notifications/push",
   rateLimits: "/v1/rate-limits",
@@ -1219,6 +1283,39 @@ export function createOpenApiDocument() {
           summary: "Local server status",
           responses: {
             "200": jsonResponse("StatusResponse"),
+          },
+        },
+      },
+      "/v1/desktop/launch": {
+        post: {
+          summary: "Launch Codex Desktop and attach Relay to its app-server",
+          requestBody: jsonRequest("DesktopLaunchRequest"),
+          responses: {
+            "200": jsonResponse("DesktopLaunchResponse"),
+            "400": jsonResponse("ErrorResponse"),
+            "500": jsonResponse("ErrorResponse"),
+          },
+        },
+      },
+      "/v1/session-source": {
+        post: {
+          summary: "Switch Relay between CLI and Codex Desktop sessions",
+          requestBody: jsonRequest("SessionSourceRequest"),
+          responses: {
+            "200": jsonResponse("SessionSourceResponse"),
+            "400": jsonResponse("ErrorResponse"),
+            "500": jsonResponse("ErrorResponse"),
+          },
+        },
+      },
+      "/v1/desktop/thread-action": {
+        post: {
+          summary: "Run an action against a Codex Desktop thread",
+          requestBody: jsonRequest("DesktopThreadActionRequest"),
+          responses: {
+            "200": jsonResponse("DesktopThreadActionResponse"),
+            "400": jsonResponse("ErrorResponse"),
+            "500": jsonResponse("ErrorResponse"),
           },
         },
       },
@@ -1537,6 +1634,48 @@ export function createOpenApiDocument() {
             },
           },
         },
+        DesktopLaunchRequest: {
+          type: "object",
+          properties: {
+            workspacePath: { type: "string" },
+          },
+        },
+        DesktopLaunchResponse: {
+          type: "object",
+          required: ["ok", "launched", "codexBinary", "workspacePath", "appServerOwnership"],
+          properties: {
+            ok: { type: "boolean", const: true },
+            launched: { type: "boolean" },
+            codexBinary: { type: "string" },
+            workspacePath: { type: "string" },
+            appServerMode: { type: "string", enum: ["stdio", "socket", "desktop"] },
+            appServerOwnership: {
+              type: "string",
+              enum: ["attached", "relay-owned", "stdio", "unavailable"],
+            },
+          },
+        },
+        SessionSourceRequest: {
+          type: "object",
+          required: ["source"],
+          properties: {
+            source: { type: "string", enum: ["cli", "desktop"] },
+          },
+        },
+        SessionSourceResponse: {
+          type: "object",
+          required: ["ok", "source", "appServerOwnership", "desktopControlSupported"],
+          properties: {
+            ok: { type: "boolean", const: true },
+            source: { type: "string", enum: ["cli", "desktop"] },
+            appServerMode: { type: "string", enum: ["stdio", "socket", "desktop"] },
+            appServerOwnership: {
+              type: "string",
+              enum: ["attached", "relay-owned", "stdio", "unavailable"],
+            },
+            desktopControlSupported: { type: "boolean" },
+          },
+        },
         ThreadGoal: {
           type: "object",
           required: [
@@ -1596,6 +1735,12 @@ export function createOpenApiDocument() {
             workspacePath: { type: "string" },
             threadCount: { type: "integer", minimum: 0 },
             appServerAvailable: { type: "boolean" },
+            appServerOwnership: {
+              type: "string",
+              enum: ["attached", "relay-owned", "stdio", "unavailable"],
+            },
+            desktopControlSupported: { type: "boolean" },
+            sessionSource: { type: "string", enum: ["cli", "desktop"] },
             preferences: { $ref: "#/components/schemas/RuntimePreferences" },
             runtimePreferencesByWorkspacePath: {
               type: "object",

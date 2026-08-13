@@ -39,6 +39,8 @@ Relay 服务，手机通过局域网（或公网）与它配对，就能随时�
 
 - 把本机工作区的 Codex 输出流式推送到已配对的手机端。
 - 手机端可发起提示词、继续线程，并在 Codex 需要输入时作出响应。
+- 可启动并接管本机 Codex 桌面端会话（macOS），也能继续现有 CLI 会话。
+- 可在设置中切换 CLI 会话与 Codex 桌面端会话，避免两套会话混在一起。
 - 查看活动线程、排队输入、审批请求与工作区状态。
 - 手机端预览 git 变更、本地 Web 输出、文件与终端界面。
 - 分开的「回合完成」与「需要操作」两类推送通知。
@@ -163,6 +165,16 @@ npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 W
 
 ## 配置与环境变量
 
+### Codex CDP 启动器
+
+仓库内置 `tools/Codex CDP.app`，用于启动带本地调试接口的 Codex 桌面端：
+
+- 不会修改或自动关闭原版 ChatGPT/Codex。
+- 如果原版已经在运行，启动器会提示先手动退出原版。
+- 正常启动后监听 `127.0.0.1:39252`，Relay 桌面端模式通过该接口读写会话。
+
+### 环境变量
+
 Relay 服务端默认监听 `0.0.0.0:8787`：
 
 | 变量 | 作用 | 默认 |
@@ -173,6 +185,11 @@ Relay 服务端默认监听 `0.0.0.0:8787`：
 | `CODEX_RELAY_AUTH_DB_PATH` | 配对与会话数据库路径 | — |
 | `CODEX_RELAY_APP_SERVER_MODE` | `socket` 共享终端/移动端会话 | `stdio` |
 | `CODEX_BIN` | Codex CLI 可执行文件路径 | — |
+| `CODEX_DESKTOP_BIN` | Codex 桌面端可执行文件路径，缺省优先使用 ChatGPT.app 内置二进制 | — |
+| `CODEX_DESKTOP_APP_PATH` | Codex/ChatGPT 桌面 App 路径，用于官方 Remote Control 设备密钥 | `/Applications/ChatGPT.app` |
+| `CODEX_DESKTOP_CDP_PORT` | 本地 Codex Desktop CDP 调试端口 | `39252` |
+| `CODEX_DESKTOP_BUNDLE_ID` | Codex 桌面 App Bundle ID | `com.openai.codex` |
+| `CODEX_DESKTOP_CDP_LAUNCHER_APP` | Codex CDP 启动器 App 路径 | `tools/Codex CDP.app` |
 | `CODEX_HOME` | 读取本地会话元数据的 Codex 家目录 | — |
 | `EXPO_PUBLIC_CODEX_RELAY_SERVER_URL` | 移动端连接 Relay 的地址（真机用 `http://<局域网IP>:8787`） | `http://127.0.0.1:8787` |
 

@@ -6,6 +6,10 @@ import {
   ContinueThreadRequestSchema,
   ContinueThreadResponseSchema,
   CreateThreadRequestSchema,
+  DesktopLaunchRequestSchema,
+  DesktopLaunchResponseSchema,
+  DesktopThreadActionRequestSchema,
+  DesktopThreadActionResponseSchema,
   EncryptedPayloadSchema,
   ImageAttachmentUploadResponseSchema,
   InterruptThreadRunResponseSchema,
@@ -25,6 +29,8 @@ import {
   ResolveApprovalRequestSchema,
   ResolveApprovalResponseSchema,
   RunThreadRequestSchema,
+  SessionSourceRequestSchema,
+  SessionSourceResponseSchema,
   RuntimePreferencesResponseSchema,
   RegisterPushNotificationRequestSchema,
   StatusResponseSchema,
@@ -67,6 +73,8 @@ import {
   type ChatMessage,
   type ContinueThreadResponse,
   type CreateThreadResponse,
+  type DesktopLaunchResponse,
+  type DesktopThreadActionResponse,
   type ErrorResponse,
   type ImageAttachmentUploadResponse,
   type ListThreadsResponse,
@@ -79,6 +87,8 @@ import {
   type PromptSkill,
   type ReasoningEffort,
   type RunThreadResponse,
+  type SessionSource,
+  type SessionSourceResponse,
   type RuntimeMode,
   type RuntimePreferences,
   type SandboxMode,
@@ -112,7 +122,17 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir, hostname, tmpdir } from "node:os";
@@ -135,6 +155,12 @@ import {
   type AppServerTurnStartParams,
   type AppServerUserInput,
 } from "./app-server.js";
+import {
+  createCodexDesktopControl,
+  supportsCodexDesktop,
+  type CodexDesktopControl,
+} from "./desktop-control.js";
+import { createLocalDesktopControl, type LocalDesktopControl } from "./local-desktop-control.js";
 import {
   classifyStreamEvent,
   createCodexClient,
@@ -175,6 +201,8 @@ import { resolveWorkspaceTerminalShell } from "./workspace-terminal-shell.js";
 
 const defaultWorkspacePath = process.cwd();
 const defaultCodexModel = "gpt-5.5";
+const maxDesktopHistoryMessages = 120;
+const maxDesktopThreadList = 100;
 const execFileAsync = promisify(execFile);
 const IMAGE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
 const WORKSPACE_FILE_PREVIEW_MAX_BYTES = 256 * 1024;
@@ -194,6 +222,8 @@ const defaultWebPreviewPorts = [3000, 3001, 5173, 4173, 8080, 19006];
 type AppOptions = {
   appServer?: CodexAppServerClient | null;
   codex?: CodexClient;
+  desktopControl?: CodexDesktopControl | null;
+  localDesktopControl?: LocalDesktopControl | null;
   pairing?: PairingOptions;
   preferences?: RuntimePreferencesStore;
   hmsPushNotificationSender?: PushNotificationSender;
@@ -328,6 +358,23 @@ export function createApp(options: AppOptions = {}) {
   const workspacePath = resolve(
     options.workspacePath ?? process.env.CODEX_RELAY_WORKSPACE_PATH ?? defaultWorkspacePath,
   );
+  const desktopControl =
+    options.desktopControl === undefined
+      ? createCodexDesktopControl({ workspacePath })
+      : options.desktopControl;
+  const localDesktopControl =
+    options.localDesktopControl === undefined
+      ? process.env.VITEST
+        ? null
+        : createLocalDesktopControl()
+      : options.localDesktopControl;
+  const persistedSessionSource = readPersistedSessionSource();
+  let sessionSource: SessionSource = localDesktopControl
+    ? "desktop"
+    : (persistedSessionSource ?? (appServer?.ownership === "attached" ? "desktop" : "cli"));
+  if (sessionSource === "desktop" && !localDesktopControl) {
+    sessionSource = "cli";
+  }
   const threads = new Map<string, ThreadMetadata>();
   const messagesByThreadId = new Map<string, ChatMessage[]>();
   const liveThreads = new Map<string, ReturnType<CodexClient["startThread"]>>();
@@ -345,6 +392,22 @@ export function createApp(options: AppOptions = {}) {
     ReadableStreamDefaultController<Uint8Array>,
     () => void
   >();
+  function resetSessionSourceState() {
+    for (const closeStream of activeStreamControllers.values()) {
+      closeStream();
+    }
+    activeStreamControllers.clear();
+    threads.clear();
+    messagesByThreadId.clear();
+    liveThreads.clear();
+    pendingApprovals.clear();
+    resolvedApprovals.clear();
+    queuedInputsByThreadId.clear();
+    activeAppServerTurnIdsByThreadId.clear();
+    forceEndedThreadIds.clear();
+    appServerHistoryLoadsByThreadId.clear();
+    steeringThreads.clear();
+  }
   const threadOptions = { workingDirectory: workspacePath };
   function runThreadOperation<T>(threadId: string, operation: () => Promise<T>) {
     const previous = threadOperationTails.get(threadId) ?? Promise.resolve();
@@ -437,6 +500,13 @@ export function createApp(options: AppOptions = {}) {
   };
 
   app.use("*", cors());
+  app.use("*", async (c, next) => {
+    relayDebugLog("http.request", {
+      method: c.req.method,
+      path: c.req.path,
+    });
+    await next();
+  });
   app.use("*", async (c, next) => {
     if (
       !options.pairing ||
@@ -690,11 +760,241 @@ export function createApp(options: AppOptions = {}) {
       workspacePath,
       threadCount: threads.size,
       appServerAvailable: Boolean(appServer),
+      appServerOwnership: appServer?.ownership ?? "unavailable",
+      desktopControlSupported: Boolean(desktopControl && supportsCodexDesktop()),
+      sessionSource,
       preferences: await preferences.read(workspacePath),
       runtimePreferencesByWorkspacePath: await preferences.readByWorkspacePath(),
     });
 
     return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+  });
+
+  app.post(apiPaths.desktopLaunch, async (c) => {
+    const parsed = await parseRequestJson(
+      c,
+      options.pairing,
+      secureSessionsByTokenHash,
+      DesktopLaunchRequestSchema,
+    );
+    if (!parsed.success) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        validationError(parsed.error),
+        400,
+      );
+    }
+    if (!desktopControl || !supportsCodexDesktop()) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("unsupported", "Codex Desktop control requires macOS with a Codex desktop app."),
+        501,
+      );
+    }
+
+    const targetWorkspacePath = parsed.data.workspacePath
+      ? resolve(parsed.data.workspacePath)
+      : workspacePath;
+    try {
+      resetSessionSourceState();
+      if (localDesktopControl) {
+        await localDesktopControl.launchApp();
+      } else {
+        await desktopControl.stopRemoteControl();
+        await desktopControl.ensureRemoteControl();
+      }
+      const launched = {
+        codexBinary: localDesktopControl ? "Codex CDP.app" : "codex",
+        launched: true,
+        workspacePath: targetWorkspacePath,
+      };
+      sessionSource = "desktop";
+      writePersistedSessionSource("desktop");
+      const response: DesktopLaunchResponse = DesktopLaunchResponseSchema.parse({
+        ok: true,
+        launched: launched.launched,
+        codexBinary: launched.codexBinary,
+        workspacePath: launched.workspacePath,
+        appServerMode: appServer?.appServerMode,
+        appServerOwnership: appServer?.ownership ?? "unavailable",
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    } catch (error) {
+      relayDebugLog("desktop.launch_failed", { message: errorMessage(error) });
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("desktop_launch_failed", `Could not launch Codex Desktop: ${errorMessage(error)}`),
+        500,
+      );
+    }
+  });
+
+  app.post(apiPaths.sessionSource, async (c) => {
+    const parsed = await parseRequestJson(
+      c,
+      options.pairing,
+      secureSessionsByTokenHash,
+      SessionSourceRequestSchema,
+    );
+    if (!parsed.success) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        validationError(parsed.error),
+        400,
+      );
+    }
+    if (parsed.data.source === "desktop" && (!desktopControl || !supportsCodexDesktop())) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("unsupported", "Codex Desktop sessions require macOS with a Codex desktop app."),
+        501,
+      );
+    }
+
+    resetSessionSourceState();
+    try {
+      if (parsed.data.source === "desktop") {
+        if (localDesktopControl) {
+          await localDesktopControl.ensureAvailable();
+        } else {
+          await desktopControl!.stopRemoteControl();
+          await desktopControl!.ensureRemoteControl();
+        }
+        sessionSource = "desktop";
+        writePersistedSessionSource("desktop");
+      } else {
+        await appServer?.switchToCliServer();
+        sessionSource = "cli";
+        writePersistedSessionSource("cli");
+      }
+      const response: SessionSourceResponse = SessionSourceResponseSchema.parse({
+        ok: true,
+        source: sessionSource,
+        appServerMode: appServer?.appServerMode,
+        appServerOwnership: appServer?.ownership ?? "unavailable",
+        desktopControlSupported: Boolean(desktopControl && supportsCodexDesktop()),
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    } catch (error) {
+      relayDebugLog("session_source.switch_failed", {
+        message: errorMessage(error),
+        source: parsed.data.source,
+      });
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError(
+          "session_source_switch_failed",
+          `Could not switch session source: ${errorMessage(error)}`,
+        ),
+        500,
+      );
+    }
+  });
+
+  app.post(apiPaths.desktopThreadAction, async (c) => {
+    const parsed = await parseRequestJson(
+      c,
+      options.pairing,
+      secureSessionsByTokenHash,
+      DesktopThreadActionRequestSchema,
+    );
+    if (!parsed.success) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        validationError(parsed.error),
+        400,
+      );
+    }
+    if (sessionSource !== "desktop" || !localDesktopControl) {
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("desktop_required", "请先切换到桌面端会话。"),
+        409,
+      );
+    }
+
+    const { threadId, action, name } = parsed.data;
+    try {
+      const result = await localDesktopControl.threadAction({
+        threadId,
+        action,
+        name,
+      });
+      if (action === "pin" || action === "unpin") {
+        const pinned = action === "pin";
+        updateLocalDesktopState((state) => ({
+          ...state,
+          pinnedThreadIds: pinned
+            ? [...new Set([...state.pinnedThreadIds, threadId])]
+            : state.pinnedThreadIds.filter((id) => id !== threadId),
+        }));
+        const cached = threads.get(threadId);
+        if (cached) {
+          threads.set(threadId, ThreadSummarySchema.parse({ ...cached, pinned }));
+        }
+      } else if (action === "rename") {
+        const renamedName = result.name ?? name ?? "";
+        updateLocalDesktopState((state) => ({
+          ...state,
+          titleOverrides: {
+            ...state.titleOverrides,
+            [threadId]: {
+              name: renamedName,
+              renamedAt: new Date().toISOString(),
+            },
+          },
+        }));
+        const cached = threads.get(threadId);
+        if (cached) {
+          threads.set(threadId, ThreadSummarySchema.parse({ ...cached, title: renamedName }));
+        }
+      }
+      const message =
+        action === "archive"
+          ? "已归档当前 Codex 桌面端线程"
+          : action === "pin"
+            ? "已置顶当前 Codex 桌面端线程"
+            : action === "unpin"
+              ? "已取消置顶当前 Codex 桌面端线程"
+              : `已重命名当前 Codex 桌面端线程为“${result.name ?? name}”`;
+      const response: DesktopThreadActionResponse = DesktopThreadActionResponseSchema.parse({
+        ok: true,
+        action,
+        threadId,
+        name: action === "rename" ? (result.name ?? name) : undefined,
+        message,
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    } catch (error) {
+      relayDebugLog("desktop.thread_action_failed", {
+        action,
+        message: errorMessage(error),
+        threadId,
+      });
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("desktop_thread_action_failed", errorMessage(error)),
+        500,
+      );
+    }
   });
 
   app.patch(apiPaths.preferences, async (c) => {
@@ -1068,11 +1368,7 @@ export function createApp(options: AppOptions = {}) {
       const outputs: string[] = [];
       if (action === "commit" || action === "commit-push") {
         await git(selectedWorkspacePath.path, ["add", "--all"]);
-        const commitOutput = await git(selectedWorkspacePath.path, [
-          "commit",
-          "-m",
-          message,
-        ]);
+        const commitOutput = await git(selectedWorkspacePath.path, ["commit", "-m", message]);
         outputs.push(commitOutput);
       }
 
@@ -1094,11 +1390,12 @@ export function createApp(options: AppOptions = {}) {
 
       const response: WorkspaceGitActionResponse = WorkspaceGitActionResponseSchema.parse({
         branch,
-        message: action === "commit"
-          ? "Committed workspace changes."
-          : action === "push"
-            ? "Pushed workspace changes."
-            : "Committed and pushed workspace changes.",
+        message:
+          action === "commit"
+            ? "Committed workspace changes."
+            : action === "push"
+              ? "Pushed workspace changes."
+              : "Committed and pushed workspace changes.",
         output: outputs.filter(Boolean).join("\n"),
       });
       return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
@@ -1839,6 +2136,13 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get(apiPaths.threads, async (c) => {
+    if (sessionSource === "desktop" && localDesktopControl && !appServer) {
+      const response: ListThreadsResponse = ListThreadsResponseSchema.parse({
+        threads: listLocalDesktopThreads(workspacePath),
+        source: "local-desktop",
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    }
     if (appServer) {
       try {
         const appServerThreads = await appServer.listThreads();
@@ -1941,6 +2245,51 @@ export function createApp(options: AppOptions = {}) {
     // 已保证 completed/failed 不会被拉回 running，所以这里只需判断「是否可能还在跑」。
     const wasKnownRunning =
       activeAppServerTurnIdsByThreadId.has(threadId) || knownThread?.state === "running";
+    if (sessionSource === "desktop" && localDesktopControl && !appServer) {
+      const desktopThread =
+        threads.get(threadId) ??
+        (await ensureLocalDesktopThread({
+          messagesByThreadId,
+          threadId,
+          threads,
+          workspacePath,
+        }));
+      if (!desktopThread) {
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("not_found", `Thread ${threadId} is not known to this server.`),
+          404,
+        );
+      }
+      const cachedMessages = messagesByThreadId.get(threadId) ?? [];
+      const rolloutHistory = readRolloutThreadMessages(threadId, workspacePath);
+      const messages =
+        rolloutHistory.messages.length > 0
+          ? resolveThreadHistoryMessages(rolloutHistory.messages, cachedMessages)
+          : dedupeThreadMessages(cachedMessages);
+      const responseThread = rememberRolloutThreadMessages(
+        threads,
+        desktopThread,
+        messages,
+        rolloutHistory.messageCountLowerBound,
+      );
+      messagesByThreadId.set(threadId, messages);
+      const response = threadDetailResponse({
+        thread: responseThread,
+        messages,
+        pendingInputRequests: pendingInputRequestsForThread(pendingApprovals, threadId),
+      });
+      relayDebugLog("thread.detail.responded", {
+        durationMs: Date.now() - detailStartedAt,
+        loadedMessages: true,
+        messageCount: messages.length,
+        state: responseThread.state,
+        threadId,
+      });
+      return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+    }
     if (appServer) {
       try {
         const thread = await appServer.readThread(threadId, {
@@ -2482,6 +2831,56 @@ export function createApp(options: AppOptions = {}) {
       );
     }
 
+    if (sessionSource === "desktop" && localDesktopControl) {
+      try {
+        const created = await localDesktopControl.newThread({
+          scope: parsed.data.workspacePath ? "project" : "conversation",
+          workspacePath: selectedWorkspacePath.path,
+        });
+        if (!created.threadId) {
+          throw new Error("桌面端新建会话后没有返回线程 ID");
+        }
+        const now = new Date().toISOString();
+        const existingThread = threads.get(created.threadId);
+        const thread =
+          existingThread ??
+          ThreadSummarySchema.parse({
+            id: created.threadId,
+            title: "新会话",
+            createdAt: now,
+            updatedAt: now,
+            state: "idle",
+            pinned: false,
+            cwd: selectedWorkspacePath.path,
+            source: "desktop",
+          });
+        threads.set(thread.id, thread);
+        if (!messagesByThreadId.has(thread.id)) {
+          messagesByThreadId.set(thread.id, []);
+        }
+        const response: CreateThreadResponse = {
+          thread,
+          messages: messagesByThreadId.get(created.threadId) ?? [],
+        };
+        relayDebugLog("thread.desktop_created", {
+          threadId: created.threadId,
+          workspacePath: selectedWorkspacePath.path,
+        });
+        return secureJson(c, options.pairing, secureSessionsByTokenHash, response, 201);
+      } catch (error) {
+        relayDebugLog("thread.desktop_create_failed", {
+          message: errorMessage(error),
+        });
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("desktop_new_thread_failed", errorMessage(error)),
+          500,
+        );
+      }
+    }
+
     const hasRequestRuntimeOptions = hasExplicitRunOptions(parsed.data);
     const runOptions =
       parsed.data.prompt || hasRequestRuntimeOptions
@@ -2581,7 +2980,7 @@ export function createApp(options: AppOptions = {}) {
     const fallbackWorkspacePath = knownThread.cwd ?? workspacePath;
     const requestedWorkspacePath =
       parsed.data.mode === "workspace"
-        ? parsed.data.workspacePath ?? fallbackWorkspacePath
+        ? (parsed.data.workspacePath ?? fallbackWorkspacePath)
         : fallbackWorkspacePath;
     const selectedWorkspacePath = await validateThreadWorkspacePath(
       workspacePath,
@@ -2612,21 +3011,16 @@ export function createApp(options: AppOptions = {}) {
     }
     const targetWorkspacePath = continuationWorktree?.path ?? selectedWorkspacePath.path;
 
-    const runOptions = withRuntimePreferences(
-      await preferences.read(targetWorkspacePath),
-      {
-        approvalPolicy: parsed.data.approvalPolicy ?? knownThread.approvalPolicy,
-        collaborationMode: parsed.data.collaborationMode ?? knownThread.collaborationMode,
-        model: parsed.data.model ?? knownThread.model,
-        reasoningEffort: parsed.data.reasoningEffort ?? knownThread.reasoningEffort,
-        runtimeMode: parsed.data.runtimeMode ?? knownThread.runtimeMode,
-        sandboxMode: parsed.data.sandboxMode,
-        serviceTier: parsed.data.serviceTier ?? knownThread.serviceTier,
-      },
-    );
-    const title =
-      parsed.data.title ??
-      continuedThreadTitle(knownThread.title, parsed.data.mode);
+    const runOptions = withRuntimePreferences(await preferences.read(targetWorkspacePath), {
+      approvalPolicy: parsed.data.approvalPolicy ?? knownThread.approvalPolicy,
+      collaborationMode: parsed.data.collaborationMode ?? knownThread.collaborationMode,
+      model: parsed.data.model ?? knownThread.model,
+      reasoningEffort: parsed.data.reasoningEffort ?? knownThread.reasoningEffort,
+      runtimeMode: parsed.data.runtimeMode ?? knownThread.runtimeMode,
+      sandboxMode: parsed.data.sandboxMode,
+      serviceTier: parsed.data.serviceTier ?? knownThread.serviceTier,
+    });
+    const title = parsed.data.title ?? continuedThreadTitle(knownThread.title, parsed.data.mode);
     const continuationPrompt = continuationPromptFromMessages(
       knownThread.title,
       messagesByThreadId.get(threadId) ?? [],
@@ -2936,6 +3330,24 @@ export function createApp(options: AppOptions = {}) {
         404,
       );
     }
+    if (sessionSource === "desktop" && localDesktopControl) {
+      try {
+        await localDesktopControl.stop({ threadId });
+      } catch (error) {
+        relayDebugLog("thread.interrupt.desktop_control_failed", {
+          message: errorMessage(error),
+          threadId,
+        });
+      }
+      const thread = forceEndThreadRun(threadId, "desktop_stop");
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        InterruptThreadRunResponseSchema.parse({ thread }),
+        200,
+      );
+    }
     if (!appServer) {
       relayDebugLog("thread.interrupt.rejected", {
         reason: "app_server_unavailable",
@@ -3060,7 +3472,11 @@ export function createApp(options: AppOptions = {}) {
         400,
       );
     }
-    if (!parsed.data.prompt && !appServer) {
+    if (
+      !parsed.data.prompt &&
+      !appServer &&
+      !(sessionSource === "desktop" && localDesktopControl)
+    ) {
       relayDebugLog("thread.stream.rejected", {
         reason: "attach_requires_app_server",
         threadId,
@@ -3118,7 +3534,11 @@ export function createApp(options: AppOptions = {}) {
             });
           },
         });
-        if (!runOptions.prompt && appServer) {
+        if (
+          !runOptions.prompt &&
+          appServer &&
+          !(sessionSource === "desktop" && localDesktopControl)
+        ) {
           void streamRunningAppServerThread({
             appServer,
             controller,
@@ -3133,6 +3553,59 @@ export function createApp(options: AppOptions = {}) {
           }).finally(() => {
             streamSettled = true;
             relayDebugLog("thread.stream.finished", { mode: "attach", threadId });
+            closeStream();
+          });
+          return;
+        }
+        if (sessionSource === "desktop" && runOptions.prompt && localDesktopControl) {
+          forceEndedThreadIds.delete(threadId);
+          relayDebugLog("thread.stream.local_desktop_started", {
+            threadId,
+            workspacePath: knownThread.cwd ?? workspacePath,
+          });
+          void runLocalDesktopPromptStreamed({
+            closeStream,
+            controller,
+            encoder,
+            localDesktopControl,
+            messagesByThreadId,
+            prompt: runOptions.prompt,
+            secureSession,
+            threadId,
+            threads,
+            workspacePath: knownThread.cwd ?? workspacePath,
+          }).finally(() => {
+            streamSettled = true;
+            relayDebugLog("thread.stream.finished", {
+              mode: "local_desktop",
+              threadId,
+            });
+            closeStream();
+          });
+          return;
+        }
+        if (sessionSource === "desktop" && localDesktopControl) {
+          relayDebugLog("thread.stream.local_desktop_attached", {
+            threadId,
+            workspacePath: knownThread.cwd ?? workspacePath,
+          });
+          void runLocalDesktopPromptStreamed({
+            closeStream,
+            controller,
+            encoder,
+            localDesktopControl,
+            messagesByThreadId,
+            prompt: undefined,
+            secureSession,
+            threadId,
+            threads,
+            workspacePath: knownThread.cwd ?? workspacePath,
+          }).finally(() => {
+            streamSettled = true;
+            relayDebugLog("thread.stream.finished", {
+              mode: "local_desktop_attach",
+              threadId,
+            });
             closeStream();
           });
           return;
@@ -3667,7 +4140,8 @@ async function runPromptStreamed(input: {
           });
         } else {
           const existing = input.messagesByThreadId
-            .get(activeThreadId)?.find((m) => m.id === thinkingMessageId);
+            .get(activeThreadId)
+            ?.find((m) => m.id === thinkingMessageId);
           const offset = existing?.content.length ?? 0;
           updateMessage(input.messagesByThreadId, activeThreadId, thinkingMessageId, {
             content: (existing?.content ?? "") + delta,
@@ -3789,6 +4263,196 @@ async function runPromptStreamed(input: {
   }
 }
 
+async function runLocalDesktopPromptStreamed(input: {
+  closeStream: () => void;
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  encoder: TextEncoder;
+  localDesktopControl: LocalDesktopControl;
+  messagesByThreadId: Map<string, ChatMessage[]>;
+  prompt?: string;
+  secureSession?: SecureSessionHandle;
+  threadId: string;
+  threads: Map<string, ThreadMetadata>;
+  workspacePath: string;
+}) {
+  let threadSummary = input.threads.get(input.threadId);
+  if (input.prompt) {
+    const userMessage = appendMessage(input.messagesByThreadId, input.threadId, {
+      role: "user",
+      content: promptWithAttachments(input.prompt, []),
+      state: "completed",
+    });
+    threadSummary = updateThread(input.threads, input.messagesByThreadId, input.threadId, {
+      state: "running",
+      lastPrompt: input.prompt,
+      lastError: undefined,
+      title: maybeReplaceDefaultTitle(input.threads.get(input.threadId)?.title, input.prompt),
+    });
+    if (
+      !sendSse(input.controller, input.encoder, input.secureSession, {
+        type: "thread.message.created",
+        thread: threadSummary,
+        message: userMessage,
+      })
+    ) {
+      return Promise.resolve();
+    }
+    if (
+      !sendSse(input.controller, input.encoder, input.secureSession, {
+        type: "thread.state.changed",
+        thread: threadSummary,
+      })
+    ) {
+      return Promise.resolve();
+    }
+  }
+
+  const baselineRollout = readRolloutThreadMessages(input.threadId, input.workspacePath);
+  const baselineTaskCompleteAt = baselineRollout.lastTaskCompleteAt;
+
+  if (input.prompt) {
+    try {
+      await input.localDesktopControl.sendPrompt({
+        prompt: input.prompt,
+        threadId: input.threadId,
+      });
+    } catch (error) {
+      threadSummary = updateThread(input.threads, input.messagesByThreadId, input.threadId, {
+        state: "failed",
+        lastError: errorMessage(error),
+      });
+      const errorBody = apiError("codex_run_failed", errorMessage(error));
+      appendMessage(input.messagesByThreadId, input.threadId, {
+        role: "error",
+        content: errorBody.error.message,
+        state: "failed",
+      });
+      sendSse(input.controller, input.encoder, input.secureSession, {
+        type: "thread.error",
+        thread: threadSummary,
+        error: errorBody.error,
+      });
+      return Promise.resolve();
+    }
+  }
+
+  let previousMessages = input.messagesByThreadId.get(input.threadId) ?? [];
+  let idlePolls = 0;
+  let finished = false;
+  let resolveFinished = () => {};
+  const finishedPromise = new Promise<void>((resolve) => {
+    resolveFinished = resolve;
+  });
+  const finish = () => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    resolveFinished();
+    clearInterval(timer);
+    clearTimeout(timeout);
+    if (threadSummary) {
+      threadSummary = updateThread(input.threads, input.messagesByThreadId, input.threadId, {
+        state: "completed",
+      });
+      sendSse(input.controller, input.encoder, input.secureSession, {
+        type: "thread.state.changed",
+        thread: threadSummary,
+      });
+    }
+    input.closeStream();
+  };
+  const timeout = setTimeout(finish, 1_800_000);
+  const timer = setInterval(() => {
+    if (finished) {
+      return;
+    }
+    try {
+      const rollout = readRolloutThreadMessages(input.threadId, input.workspacePath);
+      if (rollout.messages.length === 0) {
+        return;
+      }
+      const turnCompletedAfterBaseline =
+        input.prompt === undefined
+          ? rollout.lastTaskCompleteAt !== undefined
+          : rollout.lastTaskCompleteAt !== undefined &&
+            rollout.lastTaskCompleteAt !== baselineTaskCompleteAt;
+      const nextThread = rememberRolloutThreadMessages(
+        input.threads,
+        threadSummary!,
+        rollout.messages,
+        rollout.messageCountLowerBound,
+      );
+      const incomingMessages = resolveThreadHistoryMessages(rollout.messages, previousMessages);
+      const mergedMessages = mergeAppServerMessagesWithLocalStatus(
+        incomingMessages,
+        previousMessages,
+      );
+      input.messagesByThreadId.set(input.threadId, mergedMessages);
+      threadSummary = nextThread;
+      const previousById = new Map(previousMessages.map((message) => [message.id, message]));
+      let sawNewMessage = false;
+      for (const message of mergedMessages) {
+        if (message.role === "user" && isDuplicateLocalUserMessage(message, previousMessages)) {
+          continue;
+        }
+        const previous = previousById.get(message.id);
+        if (
+          previous &&
+          previous.content === message.content &&
+          previous.state === message.state &&
+          previous.kind === message.kind
+        ) {
+          continue;
+        }
+        sawNewMessage = true;
+        if (
+          !sendSse(input.controller, input.encoder, input.secureSession, {
+            type:
+              message.role === "assistant" && message.state === "completed"
+                ? "thread.message.completed"
+                : "thread.message.created",
+            thread: threadSummary,
+            message,
+          })
+        ) {
+          finish();
+          return;
+        }
+      }
+      previousMessages = mergedMessages;
+      if (turnCompletedAfterBaseline && !sawNewMessage) {
+        idlePolls += 1;
+      } else {
+        idlePolls = 0;
+      }
+      if (idlePolls >= 4) {
+        finish();
+      }
+    } catch (error) {
+      relayDebugLog("thread.stream.local_desktop_poll_failed", {
+        message: errorMessage(error),
+        threadId: input.threadId,
+      });
+    }
+  }, 500);
+
+  return finishedPromise;
+}
+
+function isDuplicateLocalUserMessage(message: ChatMessage, previousMessages: ChatMessage[]) {
+  if (message.role !== "user") {
+    return false;
+  }
+  const normalized = message.content.trim();
+  return previousMessages.some(
+    (previous) =>
+      previous.role === "user" &&
+      previous.content.trim() === normalized &&
+      previous.content.length > 0,
+  );
+}
+
 async function startAppServerTurn(
   appServer: CodexAppServerClient,
   threadId: string,
@@ -3807,7 +4471,24 @@ async function startAppServerTurn(
     threadId,
   };
 
-  await resumeAppServerThreadIfNeeded(appServer, threadId, input, runtime);
+  if (typeof appServer.readThread === "function") {
+    try {
+      await appServer.readThread(threadId, { includeTurns: false });
+    } catch (readError) {
+      relayDebugLog("app_server.thread_read.before_turn_failed", {
+        message: errorMessage(readError),
+        threadId,
+      });
+    }
+  }
+  try {
+    await resumeAppServerThread(appServer, threadId, input, runtime);
+  } catch (resumeError) {
+    relayDebugLog("app_server.thread_resume.before_turn_failed", {
+      message: errorMessage(resumeError),
+      threadId,
+    });
+  }
   try {
     return await appServer.startTurn(params);
   } catch (error) {
@@ -3817,28 +4498,6 @@ async function startAppServerTurn(
     await resumeAppServerThread(appServer, threadId, input, runtime);
     return appServer.startTurn(params);
   }
-}
-
-async function resumeAppServerThreadIfNeeded(
-  appServer: CodexAppServerClient,
-  threadId: string,
-  input: QueuedThreadInput,
-  runtime: ReturnType<typeof resolveAppServerRuntime>,
-) {
-  if (typeof appServer.readThread !== "function") {
-    return;
-  }
-
-  let thread: AppServerThread;
-  try {
-    thread = await appServer.readThread(threadId, { includeTurns: false });
-  } catch {
-    return;
-  }
-  if (!isAppServerThreadNotLoaded(thread)) {
-    return;
-  }
-  await resumeAppServerThread(appServer, threadId, input, runtime);
 }
 
 async function resumeAppServerThread(
@@ -3860,13 +4519,6 @@ async function resumeAppServerThread(
     serviceTier: input.runOptions.serviceTier ?? null,
     threadId,
   });
-}
-
-function isAppServerThreadNotLoaded(thread: AppServerThread) {
-  const status = thread.status;
-  return Boolean(
-    status && typeof status === "object" && "type" in status && status.type === "notLoaded",
-  );
 }
 
 function latestRunningTurnId(thread: AppServerThread) {
@@ -3993,10 +4645,7 @@ async function streamRunningAppServerThread(input: {
           rolloutHistory.messages,
           rolloutHistory.messageCountLowerBound,
         );
-        incomingMessages = resolveThreadHistoryMessages(
-          rolloutHistory.messages,
-          previousMessages,
-        );
+        incomingMessages = resolveThreadHistoryMessages(rolloutHistory.messages, previousMessages);
       }
       if (input.signal.aborted || !nextThread) {
         return;
@@ -4036,9 +4685,10 @@ async function streamRunningAppServerThread(input: {
           continue;
         }
         sendSse(input.controller, input.encoder, input.secureSession, {
-          type: message.role === "assistant" && message.state === "completed"
-            ? "thread.message.completed"
-            : "thread.message.created",
+          type:
+            message.role === "assistant" && message.state === "completed"
+              ? "thread.message.completed"
+              : "thread.message.created",
           thread: threadSummary,
           message,
         });
@@ -6372,9 +7022,10 @@ function continuedThreadTitle(title: string | undefined, mode: "chat" | "workspa
 function continuationPromptFromMessages(title: string | undefined, messages: ChatMessage[]) {
   const maxMessages = 12;
   const maxCharacters = 12_000;
-  const candidates = messages.filter((message) =>
-    (message.role === "user" || message.role === "assistant" || message.kind === "plan") &&
-    message.content.trim().length > 0,
+  const candidates = messages.filter(
+    (message) =>
+      (message.role === "user" || message.role === "assistant" || message.kind === "plan") &&
+      message.content.trim().length > 0,
   );
   const selected = candidates.slice(-maxMessages);
   const context: string[] = [];
@@ -6719,8 +7370,12 @@ function preserveKnownRunningThreadState(thread: ThreadMetadata, wasKnownRunning
   // completed/failed 是 app-server 的权威终态，即使本地还有残留的活跃 turn
   // 也不能把已结束的对话拉回 running；只有 idle/unknown 才需要保留运行态，
   // 避免 attach 轮询瞬间把正在工作的线程误降级。
-  if (!wasKnownRunning || thread.state === "running" ||
-      thread.state === "completed" || thread.state === "failed") {
+  if (
+    !wasKnownRunning ||
+    thread.state === "running" ||
+    thread.state === "completed" ||
+    thread.state === "failed"
+  ) {
     return thread;
   }
   return ThreadSummarySchema.parse({
@@ -6874,12 +7529,7 @@ function crossSourceMessageKey(message: ChatMessage) {
   if (message.role !== "user" && message.role !== "assistant") {
     return undefined;
   }
-  return [
-    message.threadId,
-    message.role,
-    message.kind,
-    message.content,
-  ].join("\n");
+  return [message.threadId, message.role, message.kind, message.content].join("\n");
 }
 
 function appendCrossSourceMessageIndex(
@@ -6996,8 +7646,9 @@ function rolloutThreadMetadata(
   return ThreadSummarySchema.parse({
     id: threadId,
     title:
-      readSessionIndexThreadTitle(threadId) ??
-      preview(lastMessage?.content || firstMessage?.content || "Codex thread"),
+      readSessionIndexThreadTitle(threadId) ||
+      preview(lastMessage?.content || firstMessage?.content || "Codex thread") ||
+      "Codex thread",
     createdAt,
     updatedAt,
     state: "idle",
@@ -7024,7 +7675,7 @@ function readSessionIndexThreadTitle(threadId: string) {
     try {
       const record = JSON.parse(line) as { id?: unknown; thread_name?: unknown };
       if (record.id === threadId && typeof record.thread_name === "string") {
-        return record.thread_name;
+        return record.thread_name.trim() ? record.thread_name : undefined;
       }
     } catch {
       // Ignore malformed index entries.
@@ -7033,13 +7684,353 @@ function readSessionIndexThreadTitle(threadId: string) {
   return undefined;
 }
 
+type LocalDesktopState = {
+  pinnedThreadIds: string[];
+  archivedThreadIds: string[];
+  titleOverrides: Record<string, { name: string; renamedAt: string }>;
+};
+
+function persistedSessionSourcePath() {
+  return (
+    process.env.CODEX_RELAY_SESSION_SOURCE_PATH?.trim() ||
+    join(homedir(), ".codex-relay", "session-source")
+  );
+}
+
+function readPersistedSessionSource(): SessionSource | undefined {
+  try {
+    const value = readFileSync(persistedSessionSourcePath(), "utf8").trim();
+    return value === "desktop" || value === "cli" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writePersistedSessionSource(source: SessionSource) {
+  try {
+    const path = persistedSessionSourcePath();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${source}\n`, "utf8");
+  } catch {
+    // Best effort; an in-memory source still works for the current process.
+  }
+}
+
+function localDesktopStatePath() {
+  return (
+    process.env.CODEX_RELAY_DESKTOP_STATE_PATH?.trim() ||
+    join(homedir(), ".codex-relay", "desktop-state.json")
+  );
+}
+
+function emptyLocalDesktopState(): LocalDesktopState {
+  return {
+    pinnedThreadIds: [],
+    archivedThreadIds: [],
+    titleOverrides: {},
+  };
+}
+
+function readLocalDesktopState(): LocalDesktopState {
+  try {
+    const parsed = JSON.parse(readFileSync(localDesktopStatePath(), "utf8")) as {
+      pinnedThreadIds?: unknown;
+      archivedThreadIds?: unknown;
+      titleOverrides?: unknown;
+    };
+    return {
+      pinnedThreadIds: Array.isArray(parsed.pinnedThreadIds)
+        ? parsed.pinnedThreadIds.filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          )
+        : [],
+      archivedThreadIds: Array.isArray(parsed.archivedThreadIds)
+        ? parsed.archivedThreadIds.filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          )
+        : [],
+      titleOverrides:
+        parsed.titleOverrides && typeof parsed.titleOverrides === "object"
+          ? (parsed.titleOverrides as LocalDesktopState["titleOverrides"])
+          : {},
+    };
+  } catch {
+    return emptyLocalDesktopState();
+  }
+}
+
+function writeLocalDesktopState(state: LocalDesktopState) {
+  const path = localDesktopStatePath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        pinnedThreadIds: [...new Set(state.pinnedThreadIds)],
+        archivedThreadIds: [...new Set(state.archivedThreadIds)],
+        titleOverrides: state.titleOverrides,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function updateLocalDesktopState(
+  update: (state: LocalDesktopState) => LocalDesktopState,
+): LocalDesktopState {
+  const state = update(readLocalDesktopState());
+  writeLocalDesktopState(state);
+  return state;
+}
+
+function listLocalDesktopRolloutPaths() {
+  const sessionsRoot = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
+  const byThreadId = new Map<string, { path: string; mtimeMs: number; birthtimeMs: number }>();
+  if (!existsSync(sessionsRoot)) {
+    return byThreadId;
+  }
+  const stack = [sessionsRoot];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+      const threadId = (entry.name.match(/([a-f0-9]{8}-[a-f0-9-]{27,})\.jsonl$/i) || [])[1];
+      if (!threadId) {
+        continue;
+      }
+      try {
+        const stat = statSync(entryPath);
+        const existing = byThreadId.get(threadId);
+        if (!existing || stat.mtimeMs > existing.mtimeMs) {
+          byThreadId.set(threadId, {
+            path: entryPath,
+            mtimeMs: stat.mtimeMs,
+            birthtimeMs: stat.birthtimeMs,
+          });
+        }
+      } catch {
+        // Ignore files that disappear during the scan.
+      }
+    }
+  }
+  return byThreadId;
+}
+
+function readLocalDesktopSessionCwd(rolloutPath: string) {
+  try {
+    const fd = openSync(rolloutPath, "r");
+    try {
+      const buffer = Buffer.alloc(64 * 1024);
+      const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+      const lines = buffer.toString("utf8", 0, bytes).split("\n").filter(Boolean).slice(0, 120);
+      for (const line of lines) {
+        try {
+          const record = JSON.parse(line) as {
+            payload?: { cwd?: unknown };
+            type?: unknown;
+          };
+          if (
+            record.type === "session_meta" &&
+            record.payload &&
+            typeof record.payload.cwd === "string" &&
+            record.payload.cwd.trim()
+          ) {
+            return record.payload.cwd.trim();
+          }
+        } catch {
+          // Ignore malformed lines in the rollout header.
+        }
+      }
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // The file can disappear while the desktop is writing it.
+  }
+  return undefined;
+}
+
+function listLocalDesktopThreads(workspacePath = defaultWorkspacePath): ThreadSummary[] {
+  const indexPath = join(
+    process.env.CODEX_HOME || join(homedir(), ".codex"),
+    "session_index.jsonl",
+  );
+  if (!existsSync(indexPath)) {
+    return [];
+  }
+  const state = readLocalDesktopState();
+  const pinnedThreadIds = new Set(state.pinnedThreadIds);
+  const archivedThreadIds = new Set(state.archivedThreadIds);
+  const byThreadId = new Map<string, { title?: string; updatedAt?: string }>();
+  for (const line of readFileSync(indexPath, "utf8").split("\n")) {
+    try {
+      const record = JSON.parse(line) as {
+        id?: unknown;
+        thread_name?: unknown;
+        updated_at?: unknown;
+      };
+      if (typeof record.id !== "string" || record.id.length === 0) {
+        continue;
+      }
+      if (archivedThreadIds.has(record.id)) {
+        continue;
+      }
+      const title =
+        typeof record.thread_name === "string" && record.thread_name.trim()
+          ? record.thread_name.trim()
+          : undefined;
+      const updatedAt =
+        typeof record.updated_at === "string" && record.updated_at.trim()
+          ? record.updated_at.trim()
+          : undefined;
+      const existing = byThreadId.get(record.id);
+      if (!existing || (updatedAt && (!existing.updatedAt || updatedAt > existing.updatedAt))) {
+        byThreadId.set(record.id, { title, updatedAt });
+      }
+    } catch {
+      // Ignore malformed session index entries.
+    }
+  }
+
+  const rolloutByThreadId = listLocalDesktopRolloutPaths();
+  const threads: ThreadSummary[] = [];
+  for (const [threadId, indexEntry] of byThreadId) {
+    const titleOverride = state.titleOverrides[threadId];
+    const title =
+      titleOverride && titleOverride.name.trim()
+        ? titleOverride.name.trim()
+        : indexEntry.title || "Codex thread";
+    const rollout = rolloutByThreadId.get(threadId);
+    let createdAt = indexEntry.updatedAt;
+    let updatedAt = indexEntry.updatedAt;
+    if (rollout) {
+      createdAt = createdAt || new Date(rollout.birthtimeMs).toISOString();
+      updatedAt = updatedAt || new Date(rollout.mtimeMs).toISOString();
+    }
+    const now = new Date().toISOString();
+    const threadCwd = rollout
+      ? readLocalDesktopSessionCwd(rollout.path) || workspacePath
+      : workspacePath;
+    threads.push(
+      ThreadSummarySchema.parse({
+        id: threadId,
+        title,
+        createdAt: createdAt || now,
+        updatedAt: updatedAt || now,
+        state: "idle",
+        pinned: pinnedThreadIds.has(threadId),
+        cwd: threadCwd,
+        source: "app",
+        messageCount: 0,
+      }),
+    );
+  }
+  return threads
+    .sort(
+      (a, b) =>
+        Number(pinnedThreadIds.has(b.id)) - Number(pinnedThreadIds.has(a.id)) ||
+        b.updatedAt.localeCompare(a.updatedAt),
+    )
+    .slice(0, maxDesktopThreadList);
+}
+
+async function ensureLocalDesktopThread(input: {
+  messagesByThreadId: Map<string, ChatMessage[]>;
+  threadId: string;
+  threads: Map<string, ThreadMetadata>;
+  workspacePath: string;
+}) {
+  const cached = input.threads.get(input.threadId);
+  if (cached) {
+    return isSubagentThread(cached) ? undefined : cached;
+  }
+  const rollout = readRolloutThreadMessages(input.threadId, input.workspacePath);
+  if (!rollout.rolloutPath) {
+    const indexPath = join(
+      process.env.CODEX_HOME || join(homedir(), ".codex"),
+      "session_index.jsonl",
+    );
+    if (!existsSync(indexPath)) {
+      return undefined;
+    }
+    for (const line of readFileSync(indexPath, "utf8").split("\n")) {
+      if (!line.includes(input.threadId)) {
+        continue;
+      }
+      try {
+        const record = JSON.parse(line) as { id?: unknown; thread_name?: unknown };
+        if (record.id !== input.threadId) {
+          continue;
+        }
+        const now = new Date().toISOString();
+        const state = readLocalDesktopState();
+        const titleOverride = state.titleOverrides[input.threadId];
+        const thread = ThreadSummarySchema.parse({
+          id: input.threadId,
+          title:
+            titleOverride && titleOverride.name.trim()
+              ? titleOverride.name.trim()
+              : typeof record.thread_name === "string" && record.thread_name.trim()
+                ? record.thread_name.trim()
+                : "Codex thread",
+          createdAt: now,
+          updatedAt: now,
+          state: "idle",
+          pinned: new Set(readLocalDesktopState().pinnedThreadIds).has(input.threadId),
+          cwd: input.workspacePath,
+          source: "app",
+        });
+        input.threads.set(thread.id, thread);
+        input.messagesByThreadId.set(thread.id, []);
+        return thread;
+      } catch {
+        // Ignore malformed session index entries.
+      }
+    }
+    return undefined;
+  }
+  const baseThread = rolloutThreadMetadata(
+    input.threadId,
+    input.workspacePath,
+    rollout.rolloutPath,
+    rollout.messages,
+  );
+  return rememberRolloutThreadMessages(
+    input.threads,
+    baseThread,
+    rollout.messages,
+    rollout.messageCountLowerBound,
+  );
+}
+
 function readRolloutThreadMessages(threadId: string, workspacePath = defaultWorkspacePath) {
   const rolloutPath = findRolloutFileForThread(threadId);
   if (!rolloutPath) {
-    return { messageCountLowerBound: 0, messages: [], rolloutPath };
+    return {
+      lastTaskCompleteAt: undefined,
+      messageCountLowerBound: 0,
+      messages: [],
+      rolloutPath,
+    };
   }
 
   const collected: ChatMessage[] = [];
+  let lastTaskCompleteAt: string | undefined;
   const applyPatchInputs = new Map<string, string>();
   const functionCalls = new Map<string, RolloutFunctionCall>();
   const handledApplyPatchCallIds = new Set<string>();
@@ -7079,6 +8070,10 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
       if (functionCallMessage) {
         collected.push(functionCallMessage);
         continue;
+      }
+      if (isRolloutTaskComplete(record)) {
+        lastTaskCompleteAt =
+          typeof record.timestamp === "string" ? record.timestamp : lastTaskCompleteAt;
       }
       if (isRolloutTaskComplete(record) && pendingApplyPatchChanges.length > 0) {
         collected.push(
@@ -7127,8 +8122,9 @@ function readRolloutThreadMessages(threadId: string, workspacePath = defaultWork
     }
   }
   return {
+    lastTaskCompleteAt,
     messageCountLowerBound: collected.length,
-    messages: collected,
+    messages: collected.slice(-maxDesktopHistoryMessages),
     rolloutPath,
   };
 }
@@ -8090,17 +9086,19 @@ function mapAppServerThreadStatusState(status: unknown) {
   if (["failed", "systemerror", "error"].includes(statusType)) {
     return "failed";
   }
-  if ([
-    "completed",
-    "complete",
-    "done",
-    "interrupted",
-    "aborted",
-    "cancelled",
-    "canceled",
-    "stopped",
-    "declined",
-  ].includes(statusType)) {
+  if (
+    [
+      "completed",
+      "complete",
+      "done",
+      "interrupted",
+      "aborted",
+      "cancelled",
+      "canceled",
+      "stopped",
+      "declined",
+    ].includes(statusType)
+  ) {
     return "completed";
   }
   if (["idle", "notloaded", "notstarted"].includes(statusType)) {
@@ -8120,17 +9118,19 @@ function mapAppServerTurnStatusState(status: unknown) {
   if (["failed", "systemerror", "error"].includes(statusType)) {
     return "failed";
   }
-  if ([
-    "completed",
-    "complete",
-    "done",
-    "interrupted",
-    "aborted",
-    "cancelled",
-    "canceled",
-    "stopped",
-    "declined",
-  ].includes(statusType)) {
+  if (
+    [
+      "completed",
+      "complete",
+      "done",
+      "interrupted",
+      "aborted",
+      "cancelled",
+      "canceled",
+      "stopped",
+      "declined",
+    ].includes(statusType)
+  ) {
     return "completed";
   }
   if (["idle", "notloaded", "notstarted"].includes(statusType)) {
@@ -8807,30 +9807,33 @@ function proposedPlanContent(value: string) {
 
 function planStepsFromContent(content: string) {
   const steps: Array<{ status: string; text: string }> = [];
-  content.replace(/\r\n/g, "\n").split("\n").forEach((line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
-    const checklistMatch = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.+)$/);
-    if (checklistMatch?.[1] && checklistMatch?.[2]) {
-      const text = checklistMatch[2].trim();
-      if (text) {
-        steps.push({
-          status: checklistMatch[1].toLowerCase() === "x" ? "completed" : "pending",
-          text,
-        });
+  content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .forEach((line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return;
       }
-      return;
-    }
-    const itemMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
-    if (itemMatch?.[1]) {
-      const text = itemMatch[1].trim();
-      if (text) {
-        steps.push({ status: "pending", text });
+      const checklistMatch = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.+)$/);
+      if (checklistMatch?.[1] && checklistMatch?.[2]) {
+        const text = checklistMatch[2].trim();
+        if (text) {
+          steps.push({
+            status: checklistMatch[1].toLowerCase() === "x" ? "completed" : "pending",
+            text,
+          });
+        }
+        return;
       }
-    }
-  });
+      const itemMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+      if (itemMatch?.[1]) {
+        const text = itemMatch[1].trim();
+        if (text) {
+          steps.push({ status: "pending", text });
+        }
+      }
+    });
   return steps.length > 0 ? steps : undefined;
 }
 
@@ -8929,7 +9932,11 @@ function planTodoStepsFromRecord(record: Record<string, unknown> | undefined) {
       planTextFromValue(stepRecord.text);
     const status =
       firstString(stepRecord, ["status"]) ??
-      (stepRecord.completed === true ? "completed" : stepRecord.completed === false ? "pending" : undefined);
+      (stepRecord.completed === true
+        ? "completed"
+        : stepRecord.completed === false
+          ? "pending"
+          : undefined);
     if (text && status) {
       steps.push({ status, text });
     }
