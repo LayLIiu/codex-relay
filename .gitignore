@@ -5,6 +5,7 @@ dogfood-output
 dogfood-output-*
 .codex-relay/
 .pnpm-store/
+apps/hm_codex/
 apps/server/.codex-relay/
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 

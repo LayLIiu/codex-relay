@@ -1,4 +1,0 @@
-[submodule "apps/hm_codex"]
-	path = apps/hm_codex
-	url = https://github.com/LayLIiu/codex-relay.git
-	branch = hm_codex

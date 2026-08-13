@@ -55,7 +55,7 @@ Relay 服务，手机通过局域网（或公网）与它配对，就能随时�
 | `packages/codex-relay` | 核心 Relay 服务端（Hono）。CLI + HTTP 服务 + 配对/会话管理，含 Vitest 测试。开发态默认监听 `8787` |
 | `packages/react-native-direct-fetch` | React Native 侧直连 Relay 的辅助库 |
 | `apps/mobile` | iOS 移动端（Expo + React Native + expo-router），用 dev-client 开发 |
-| `apps/hm_codex` | HarmonyOS 客户端（git 子模块，DevEco Studio 工程） |
+| `apps/hm_codex` | HarmonyOS 客户端（本机独立维护，暂未随仓库公开） |
 | `tools/relay-panel` | 网页版控制面板：一键启停 Relay、配对二维码、批准配对、看日志 |
 | `tools/relay-panel-desktop` | Electron 桌面版控制面板：把「面板 + Relay 服务器」打包成可双击运行的 App |
 
@@ -100,7 +100,7 @@ iOS（真机 / 模拟器）：
 pnpm dev:mobile:ios
 ```
 
-HarmonyOS：用 DevEco Studio 打开 `apps/hm_codex` 子模块，构建安装到设备。
+HarmonyOS：用 DevEco Studio 打开本机独立维护的 `apps/hm_codex` 工程，构建安装到设备。
 
 ### 5. 配对
 
