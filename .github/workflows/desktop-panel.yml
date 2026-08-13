@@ -1,0 +1,73 @@
+name: Build Desktop Panel
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-panel-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: mac
+          - os: windows-latest
+            target: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Relay server
+        run: pnpm --filter codex-relay build
+
+      - name: Install panel dependencies
+        working-directory: tools/relay-panel-desktop
+        run: npm install
+
+      - name: Build macOS package
+        if: matrix.target == 'mac'
+        working-directory: tools/relay-panel-desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run build:mac
+
+      - name: Build Windows package
+        if: matrix.target == 'win'
+        working-directory: tools/relay-panel-desktop
+        run: npm run build:win
+
+      - name: Upload macOS installer
+        if: matrix.target == 'mac'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-relay-panel-macos
+          path: tools/relay-panel-desktop/dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload Windows installer
+        if: matrix.target == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-relay-panel-windows
+          path: tools/relay-panel-desktop/dist/*.exe
+          if-no-files-found: error

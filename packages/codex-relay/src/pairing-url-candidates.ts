@@ -44,12 +44,16 @@ export function createPairingQrPayload(details: { serverPublicKey: string; serve
 }
 
 export function getConnectUrlCandidates(details: { listenUrl: string; port: number }) {
-  return dedupeCandidates([
+  const candidates = dedupeCandidates([
     ...publicUrlCandidates(),
     ...tailscaleConnectUrlCandidates(details.port),
     ...localNetworkConnectUrlCandidates(details.port),
     { label: "Server", url: details.listenUrl },
   ]);
+  const reachable = candidates.filter(
+    (candidate) => !isLocalOnlyHost(parseUrlHost(candidate.url) ?? ""),
+  );
+  return reachable.length > 0 ? reachable : candidates;
 }
 
 export function normalizeUrl(value: string | undefined) {
@@ -150,6 +154,7 @@ function compactCandidateHosts(primaryServerUrl: string, serverUrls: string[]) {
       candidate &&
       candidate.protocol === primary.protocol &&
       candidate.port === primary.port &&
+      !isLocalOnlyHost(candidate.hostname) &&
       !hosts.includes(candidate.hostname)
     ) {
       hosts.push(candidate.hostname);
@@ -180,6 +185,10 @@ function isLocalhost(host: string) {
 
 function isUnspecifiedHost(host: string) {
   return host === "0.0.0.0" || host === "::";
+}
+
+function isLocalOnlyHost(host: string) {
+  return isLocalhost(host) || isUnspecifiedHost(host);
 }
 
 function isTailscaleHost(host: string) {

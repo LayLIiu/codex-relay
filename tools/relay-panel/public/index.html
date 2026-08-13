@@ -69,6 +69,11 @@
     .btn.start { background: #1f9d5a; }
     .btn.stop { background: #c04a4a; }
     .btn.build { background: #3a6ef0; }
+    .btn.allow {
+      background: #2f6485;
+      margin-top: 10px;
+      width: 100%;
+    }
 
     .qr-wrap {
       display: flex;
@@ -198,6 +203,7 @@
         <button class="btn stop" id="btnStop">⏹ 停止服务</button>
         <button class="btn build" id="btnBuild">🔨 构建并重启</button>
       </div>
+      <button class="btn allow" id="btnFirewall">🛡 修复 Windows 防火墙</button>
       <div class="message" id="startMsg"></div>
     </div>
 
@@ -345,6 +351,20 @@
       } finally {
         $("btnBuild").disabled = false;
         refreshStatus();
+      }
+    });
+
+    $("btnFirewall").addEventListener("click", async () => {
+      showMessage("startMsg", "正在添加 Windows 防火墙规则...");
+      $("btnFirewall").disabled = true;
+      try {
+        const res = await fetch("/api/firewall-allow", { method: "POST" });
+        const data = await res.json();
+        showMessage("startMsg", data.message || (data.ok ? "已处理" : "处理失败"), !data.ok);
+      } catch (error) {
+        showMessage("startMsg", "添加防火墙规则失败：" + error.message, true);
+      } finally {
+        $("btnFirewall").disabled = false;
       }
     });
 

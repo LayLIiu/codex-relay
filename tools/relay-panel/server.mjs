@@ -18,7 +18,22 @@ const RELAY_PORT = Number(process.env.RELAY_PORT ?? 17878);
 const PUBLIC_URL = process.env.PUBLIC_URL ?? "";
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const PUBLIC_DIR = resolve(import.meta.dirname, "public");
-const DATA_DIR = join(homedir(), "Library", "Application Support", "codex-relay");
+
+function appDataDir() {
+  if (process.platform === "win32") {
+    return join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "codex-relay");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "codex-relay");
+  }
+  return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "codex-relay");
+}
+
+const DATA_DIR = appDataDir();
+
+function nodeRuntimeBin() {
+  return process.env.NODE_BIN?.trim() || process.execPath;
+}
 
 let relayProcess = null;
 let relayLog = [];
@@ -68,14 +83,22 @@ function startRelay() {
     return { ok: true, alreadyRunning: true };
   }
   const relayBin = process.env.RELAY_BIN;
+  const relayEnv = {
+    ...process.env,
+    NODE_BIN: nodeRuntimeBin(),
+    HOST: process.env.HOST ?? "0.0.0.0",
+    PORT: String(RELAY_PORT),
+    ELECTRON_RUN_AS_NODE: "1",
+  };
   const child = relayBin
-    ? spawn(process.execPath, [relayBin], {
+    ? spawn(nodeRuntimeBin(), [relayBin], {
         cwd: dirname(relayBin),
-        env: { ...process.env, PORT: String(RELAY_PORT) },
+        env: relayEnv,
       })
-    : spawn("pnpm", ["dev"], {
+    : spawn(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["dev"], {
         cwd: REPO_ROOT,
-        env: { ...process.env, PORT: String(RELAY_PORT) },
+        env: relayEnv,
+        shell: process.platform === "win32",
       });
   relayProcess = child;
 
@@ -122,7 +145,11 @@ function stopRelay() {
   }
   const child = relayProcess;
   relayProcess = null;
-  child.kill("SIGTERM");
+  if (process.platform === "win32") {
+    child.kill();
+  } else {
+    child.kill("SIGTERM");
+  }
   setTimeout(() => {
     if (child.exitCode === null) {
       child.kill("SIGKILL");
@@ -141,11 +168,17 @@ async function buildAndRestartRelay() {
   if (hasTsdown) {
     try {
       const { stdout, stderr } = await execFileAsync(
-        "/opt/homebrew/bin/node",
+        nodeRuntimeBin(),
         [tsdownBin],
         {
           cwd: resolve(REPO_ROOT, "packages", "codex-relay"),
-          env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH ?? ""}` },
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: "1",
+            PATH: process.platform === "darwin"
+              ? `/opt/homebrew/bin:${process.env.PATH ?? ""}`
+              : process.env.PATH ?? "",
+          },
           maxBuffer: 8 * 1024 * 1024,
         },
       );
@@ -261,6 +294,58 @@ async function approveCode(rawCode) {
   }
 }
 
+async function allowWindowsFirewall() {
+  if (process.platform !== "win32") {
+    return { ok: true, message: "当前系统无需添加 Windows 防火墙规则。" };
+  }
+  const nodeBin = nodeRuntimeBin();
+  if (!nodeBin) {
+    return { ok: false, message: "未找到内置 Node.js 运行时，无法添加防火墙规则。" };
+  }
+  const ruleName = `Codex Relay Panel TCP ${RELAY_PORT}`;
+  const firewallArgs = [
+    "advfirewall",
+    "firewall",
+    "add",
+    "rule",
+    `name=${ruleName}`,
+    "dir=in",
+    "action=allow",
+    "protocol=TCP",
+    `localport=${RELAY_PORT}`,
+    `program=${nodeBin}`,
+    "profile=private,domain",
+  ];
+  try {
+    await execFileAsync("netsh", firewallArgs, {
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    return {
+      ok: true,
+      message: `已添加防火墙规则：${ruleName}，手机应该能通过局域网地址访问 Relay。`,
+    };
+  } catch (error) {
+    const quotedArgs = firewallArgs.map((arg) => `'${arg.replace(/'/g, "''")}'`).join(", ");
+    const powershellCommand = `Start-Process -FilePath 'netsh.exe' -ArgumentList @(${quotedArgs}) -Verb RunAs -Wait`;
+    try {
+      await execFileAsync("powershell.exe", ["-NoProfile", "-Command", powershellCommand], {
+        timeout: 60_000,
+        windowsHide: true,
+      });
+      return {
+        ok: true,
+        message: `已通过管理员授权添加防火墙规则：${ruleName}，请重新扫码配对。`,
+      };
+    } catch (elevationError) {
+      return {
+        ok: false,
+        message: `无法自动添加防火墙规则：${elevationError.message}。请手动允许 ${nodeBin} 访问专用网络。`,
+      };
+    }
+  }
+}
+
 async function status() {
   await refreshStateFromDisk();
   const busy = await isRelayPortBusy();
@@ -360,6 +445,11 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && path === "/api/approve") {
       const body = await readBody(req);
       const result = await approveCode(body.code);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    if (req.method === "POST" && path === "/api/firewall-allow") {
+      const result = await allowWindowsFirewall();
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

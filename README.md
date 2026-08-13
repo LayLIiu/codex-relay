@@ -153,7 +153,8 @@ npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 W
 | `pnpm dev` / `pnpm dev:server` | 启动 Relay 服务端（`tsx watch`，8787） |
 | `pnpm panel` | 启动网页版控制面板（7800） |
 | `pnpm panel:desktop` | Electron 开发模式运行桌面版 |
-| `pnpm panel:desktop:build` | 构建桌面版 mac 安装包 |
+| `pnpm panel:desktop:build` | 构建桌面版 macOS 安装包 |
+| `pnpm panel:desktop:build:win` | 在 Windows 上构建桌面版 Windows 安装包 |
 | `pnpm dev:mobile` | 启动 Expo Metro（dev-client） |
 | `pnpm dev:mobile:ios` | 构建并运行 iOS dev-client |
 | `pnpm dev:mobile:android` | 构建并运行 Android dev-client |

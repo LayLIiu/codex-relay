@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPairingQrPayload,
+  getConnectUrlCandidates,
   getConnectUrlGuidance,
   normalizeUrl,
 } from "../src/pairing-url-candidates.js";
@@ -31,6 +32,26 @@ describe("pairing URL candidates", () => {
     const parsed = new URL(payload);
     expect(parsed.searchParams.get("serverUrl")).toBe("http://192.168.1.10:8787");
     expect(parsed.searchParams.has("h")).toBe(false);
+  });
+
+  it("does not put 0.0.0.0 into compact pairing hosts", () => {
+    const payload = createPairingQrPayload({
+      serverPublicKey: "server-public-key",
+      serverUrls: ["http://192.168.1.10:8787", "http://0.0.0.0:8787"],
+    });
+
+    const parsed = new URL(payload);
+    expect(parsed.searchParams.get("serverUrl")).toBe("http://192.168.1.10:8787");
+    expect(parsed.searchParams.get("h")).toBeNull();
+  });
+
+  it("filters local-only listen addresses from connect URL candidates", () => {
+    const candidates = getConnectUrlCandidates({
+      listenUrl: "http://0.0.0.0:17878",
+      port: 17878,
+    });
+
+    expect(candidates.some((candidate) => candidate.url.includes("0.0.0.0"))).toBe(false);
   });
 
   it("does not compact candidates with a different protocol or port", () => {
