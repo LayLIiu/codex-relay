@@ -361,7 +361,6 @@ export function createLocalDesktopControl(
       try {
         await desktopIpc.sendRequest("thread-follower-interrupt-turn", {
           conversationId: input.threadId,
-          turnId: null,
         });
         return;
       } catch (ipcError) {
@@ -389,8 +388,6 @@ export function createLocalDesktopControl(
           conversationId: input.threadId,
           threadSettings: {
             model: target.id,
-            effort: null,
-            serviceTier: null,
           },
         });
         return { target: target.displayName };
@@ -413,9 +410,7 @@ export function createLocalDesktopControl(
         await desktopIpc.sendRequest("thread-follower-update-thread-settings", {
           conversationId: input.threadId,
           threadSettings: {
-            model: null,
             effort: target.value,
-            serviceTier: null,
           },
         });
         return { target: target.label };
@@ -536,16 +531,25 @@ export function createLocalDesktopControl(
     options?: DesktopPromptRuntimeOptions;
   }) {
     const options = input.options ?? {};
+    const threadSettings: Record<string, unknown> = {};
+    if (options.model?.trim()) {
+      threadSettings.model = options.model.trim();
+    }
+    if (options.reasoningEffort?.trim()) {
+      threadSettings.effort = options.reasoningEffort.trim();
+    }
+    if (options.serviceTier?.trim()) {
+      threadSettings.serviceTier = options.serviceTier.trim();
+    }
+    if (options.collaborationMode !== undefined) {
+      threadSettings.collaborationMode = options.collaborationMode;
+    }
+    if (Object.keys(threadSettings).length === 0) {
+      return;
+    }
     await desktopIpc.sendRequest("thread-follower-update-thread-settings", {
       conversationId: input.threadId,
-      threadSettings: {
-        model: options.model?.trim() || null,
-        effort: options.reasoningEffort?.trim() || null,
-        serviceTier: options.serviceTier?.trim() || null,
-        ...(options.collaborationMode !== undefined
-          ? { collaborationMode: options.collaborationMode }
-          : {}),
-      },
+      threadSettings,
     });
   }
 
@@ -567,7 +571,6 @@ export function createLocalDesktopControl(
     await desktopIpc.sendRequest("thread-follower-steer-turn", {
       conversationId: input.threadId,
       input: [{ type: "text", text: input.prompt }],
-      expectedTurnId: null,
     });
   }
 
@@ -587,11 +590,14 @@ export function createLocalDesktopControl(
         });
       }
     }
-    await desktopIpc.sendRequest("thread-follower-steer-turn", {
+    const steerParams: Record<string, unknown> = {
       conversationId: input.threadId,
       input: [{ type: "text", text: input.prompt }],
-      expectedTurnId: input.expectedTurnId ?? null,
-    });
+    };
+    if (input.expectedTurnId?.trim()) {
+      steerParams.expectedTurnId = input.expectedTurnId.trim();
+    }
+    await desktopIpc.sendRequest("thread-follower-steer-turn", steerParams);
   }
 
   async function resolveApproval(input: {
