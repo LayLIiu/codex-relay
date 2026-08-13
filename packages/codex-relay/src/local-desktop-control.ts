@@ -494,7 +494,10 @@ export function createLocalDesktopControl(
     }
     try {
       await ensureAvailable();
-    } catch {
+    } catch (availabilityError) {
+      if (!useCdp) {
+        throw new Error(`桌面端 IPC 未就绪：${errorMessage(availabilityError)}`);
+      }
       // IPC 未就绪时继续走 macOS 自动化兜底，不再要求 CDP。
     }
     try {
@@ -541,7 +544,11 @@ export function createLocalDesktopControl(
     if (options.serviceTier?.trim()) {
       threadSettings.serviceTier = options.serviceTier.trim();
     }
-    if (options.collaborationMode !== undefined) {
+    if (
+      options.collaborationMode &&
+      typeof options.collaborationMode === "object" &&
+      !Array.isArray(options.collaborationMode)
+    ) {
       threadSettings.collaborationMode = options.collaborationMode;
     }
     if (Object.keys(threadSettings).length === 0) {
@@ -653,7 +660,9 @@ export function createLocalDesktopControl(
           ? { approvalPolicy: options.approvalPolicy.trim() }
           : {}),
         ...(options.sandboxMode?.trim() ? { sandboxMode: options.sandboxMode.trim() } : {}),
-        ...(options.collaborationMode !== undefined
+        ...(options.collaborationMode &&
+        typeof options.collaborationMode === "object" &&
+        !Array.isArray(options.collaborationMode)
           ? { collaborationMode: options.collaborationMode }
           : {}),
       },
