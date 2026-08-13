@@ -37,6 +37,7 @@ describe("POST /v1/desktop/launch", () => {
       steer: vi.fn<() => Promise<void>>(async () => {}),
       resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
       compactThread: vi.fn<() => Promise<void>>(async () => {}),
+      followThread: vi.fn<() => void>(() => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";
@@ -107,6 +108,7 @@ describe("POST /v1/desktop/launch", () => {
       steer: vi.fn<() => Promise<void>>(async () => {}),
       resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
       compactThread: vi.fn<() => Promise<void>>(async () => {}),
+      followThread: vi.fn<() => void>(() => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";
@@ -203,6 +205,7 @@ describe("desktop session control APIs", () => {
       steer: vi.fn<() => Promise<void>>(async () => {}),
       resolveApproval: vi.fn<() => Promise<void>>(async () => {}),
       compactThread: vi.fn<() => Promise<void>>(async () => {}),
+      followThread: vi.fn<() => void>(() => {}),
       newThread: vi.fn<
         (input?: {
           scope?: "conversation" | "project";

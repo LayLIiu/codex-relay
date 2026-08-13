@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import type { PromptAttachment, PromptSkill } from "./api-schema.js";
 import { relayDebugLog } from "./debug-log.js";
-import { createDesktopIpcClient } from "./desktop-ipc.js";
+import { createDesktopIpcClient, type DesktopIpcBroadcastEnvelope } from "./desktop-ipc.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,6 +41,13 @@ export type DesktopPromptRuntimeOptions = {
   sandboxMode?: string;
   serviceTier?: string;
   skills?: PromptSkill[];
+};
+
+export type DesktopPendingAction = {
+  id: string;
+  method: string;
+  params: Record<string, unknown>;
+  threadId: string;
 };
 
 export type LocalDesktopControl = {
@@ -77,6 +84,7 @@ export type LocalDesktopControl = {
     answers?: string[];
   }): Promise<void>;
   compactThread(threadId: string): Promise<void>;
+  followThread(threadId: string): void;
   newThread(input?: {
     scope?: "conversation" | "project";
     workspacePath?: string;
@@ -98,6 +106,7 @@ export type LocalDesktopControlOptions = {
   readonly bundleId?: string;
   readonly cdpPort?: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly onPendingActions?: (threadId: string, actions: DesktopPendingAction[]) => void;
 };
 
 const REASONING_MODE_TARGETS: Record<string, { key: string; value: string; label: string }> = {
@@ -111,7 +120,12 @@ export function createLocalDesktopControl(
   options: LocalDesktopControlOptions = {},
 ): LocalDesktopControl {
   const env = options.env ?? process.env;
-  const desktopIpc = createDesktopIpcClient({ requestTimeoutMs: 3_000 });
+  const followedThreadIds = new Set<string>();
+  const conversationStatesByThreadId = new Map<string, Record<string, unknown>>();
+  const desktopIpc = createDesktopIpcClient({
+    onBroadcast: handleDesktopBroadcast,
+    requestTimeoutMs: 3_000,
+  });
   const appPath =
     options.appPath?.trim() || env.CODEX_DESKTOP_APP_PATH?.trim() || "/Applications/ChatGPT.app";
   const bundleId =
@@ -208,6 +222,7 @@ export function createLocalDesktopControl(
     if (!threadId) {
       return;
     }
+    followThread(threadId);
     await execFileAsync("/usr/bin/open", [`codex://threads/${encodeURIComponent(threadId)}`]);
     await execFileAsync("/usr/bin/open", ["-b", bundleId]);
     await sleep(CODEX_DEEPLINK_SETTLE_MS + CODEX_APP_FOCUS_SETTLE_MS);
@@ -476,6 +491,7 @@ export function createLocalDesktopControl(
     threadId: string;
     options?: DesktopPromptRuntimeOptions;
   }) {
+    followThread(input.threadId);
     try {
       if (input.options) {
         try {
@@ -1069,6 +1085,7 @@ end tell
     steer,
     resolveApproval,
     compactThread,
+    followThread,
     newThread,
     stop,
     selectModel,
@@ -1076,6 +1093,35 @@ end tell
     threadAction,
     listModels,
   };
+
+  function followThread(threadId: string) {
+    if (threadId) {
+      followedThreadIds.add(threadId);
+    }
+  }
+
+  function handleDesktopBroadcast(envelope: DesktopIpcBroadcastEnvelope) {
+    if (envelope.method !== "thread-stream-state-changed") {
+      return;
+    }
+    const params = envelope.params ?? {};
+    const threadId =
+      desktopReadString(params.conversationId) || desktopReadString(params.conversation_id);
+    if (!threadId || !followedThreadIds.has(threadId)) {
+      return;
+    }
+    const previousState = conversationStatesByThreadId.get(threadId);
+    const nextState = applyDesktopConversationStateChange(previousState, params.change);
+    if (!nextState) {
+      return;
+    }
+    relayDebugLog("desktop.broadcast.state_changed", {
+      threadId,
+      requestCount: Array.isArray(nextState.requests) ? nextState.requests.length : 0,
+    });
+    conversationStatesByThreadId.set(threadId, nextState);
+    options.onPendingActions?.(threadId, projectDesktopPendingActions(threadId, nextState));
+  }
 
   async function isCodexAppRunning() {
     try {
@@ -1322,4 +1368,132 @@ async function runProcess(command: string, args: string[], options: { timeout?: 
 
 function sleep(ms: number) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+const desktopActionMethods = new Set([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/fileRead/requestApproval",
+  "item/permissions/requestApproval",
+  "item/tool/requestUserInput",
+]);
+
+function desktopReadString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function cloneDesktopJSON(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function applyDesktopConversationStateChange(
+  previousState: Record<string, unknown> | undefined,
+  change: unknown,
+): Record<string, unknown> | null {
+  if (!change || typeof change !== "object" || Array.isArray(change)) {
+    return null;
+  }
+  const changeRecord = change as Record<string, unknown>;
+  const type = desktopReadString(changeRecord.type).toLowerCase();
+  if (type === "snapshot") {
+    const state = changeRecord.conversationState ?? changeRecord.conversation_state;
+    if (!state || typeof state !== "object" || Array.isArray(state)) {
+      return null;
+    }
+    return cloneDesktopJSON(state as Record<string, unknown>);
+  }
+  if (type !== "patches") {
+    return previousState ?? null;
+  }
+  const patches = Array.isArray(changeRecord.patches) ? changeRecord.patches : [];
+  if (!previousState || patches.length === 0) {
+    return previousState ?? null;
+  }
+  const nextState = cloneDesktopJSON(previousState);
+  for (const patch of patches) {
+    if (patch && typeof patch === "object" && !Array.isArray(patch)) {
+      applyDesktopPatch(nextState, patch as Record<string, unknown>);
+    }
+  }
+  return nextState;
+}
+
+function applyDesktopPatch(target: Record<string, unknown>, patch: Record<string, unknown>) {
+  const path = Array.isArray(patch.path) ? patch.path : [];
+  const op = desktopReadString(patch.op).toLowerCase();
+  if (!op || path.length === 0) {
+    return;
+  }
+  let parent: unknown = target;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const key = path[index];
+    if (parent && typeof parent === "object" && !Array.isArray(parent)) {
+      parent = (parent as Record<string, unknown>)[key];
+    } else {
+      return;
+    }
+  }
+  const key = path[path.length - 1];
+  if (op === "remove") {
+    if (Array.isArray(parent) && Number.isInteger(key)) {
+      (parent as unknown[]).splice(key as number, 1);
+    } else if (parent && typeof parent === "object") {
+      delete (parent as Record<string, unknown>)[key as string];
+    }
+    return;
+  }
+  if (op === "add" || op === "replace") {
+    if (Array.isArray(parent) && Number.isInteger(key)) {
+      if (op === "add") {
+        (parent as unknown[]).splice(key as number, 0, patch.value);
+      } else {
+        (parent as unknown[])[key as number] = patch.value;
+      }
+    } else if (parent && typeof parent === "object") {
+      (parent as Record<string, unknown>)[key as string] = patch.value;
+    }
+  }
+}
+
+function projectDesktopPendingActions(
+  threadId: string,
+  state: Record<string, unknown>,
+): DesktopPendingAction[] {
+  const requests = Array.isArray(state.requests) ? state.requests : [];
+  return requests
+    .filter(
+      (request) =>
+        request &&
+        typeof request === "object" &&
+        (request as Record<string, unknown>).completed !== true &&
+        desktopActionMethods.has(desktopReadString((request as Record<string, unknown>).method)),
+    )
+    .map((request) => projectDesktopPendingAction(threadId, request as Record<string, unknown>))
+    .filter((action): action is DesktopPendingAction => Boolean(action));
+}
+
+function projectDesktopPendingAction(
+  threadId: string,
+  request: Record<string, unknown>,
+): DesktopPendingAction | null {
+  const id =
+    typeof request.id === "string" && request.id
+      ? request.id
+      : typeof request.id === "number" && Number.isFinite(request.id)
+        ? String(request.id)
+        : "";
+  const method = desktopReadString(request.method);
+  const params =
+    request.params && typeof request.params === "object" && !Array.isArray(request.params)
+      ? (request.params as Record<string, unknown>)
+      : {};
+  if (!id || !method) {
+    return null;
+  }
+  return {
+    id,
+    method,
+    params,
+    threadId: desktopReadString(params.threadId) || desktopReadString(params.thread_id) || threadId,
+  };
 }

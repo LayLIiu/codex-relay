@@ -162,6 +162,7 @@ import {
 } from "./desktop-control.js";
 import {
   createLocalDesktopControl,
+  type DesktopPendingAction,
   type DesktopPromptRuntimeOptions,
   type LocalDesktopControl,
 } from "./local-desktop-control.js";
@@ -284,7 +285,11 @@ const AppServerThreadGoalPayloadSchema = z.object({
 });
 
 type PendingApproval = {
-  appServer: CodexAppServerClient;
+  appServer?: CodexAppServerClient;
+  desktop?: {
+    method: string;
+    requestId: string;
+  };
   kind:
     | "commandExecution"
     | "fileChange"
@@ -368,11 +373,17 @@ export function createApp(options: AppOptions = {}) {
     options.desktopControl === undefined
       ? createCodexDesktopControl({ workspacePath })
       : options.desktopControl;
+  const desktopPendingActionsByThreadId = new Map<string, DesktopPendingAction[]>();
+  const emittedDesktopActionIds = new Set<string>();
   const localDesktopControl =
     options.localDesktopControl === undefined
       ? process.env.VITEST
         ? null
-        : createLocalDesktopControl()
+        : createLocalDesktopControl({
+            onPendingActions(threadId, actions) {
+              desktopPendingActionsByThreadId.set(threadId, actions);
+            },
+          })
       : options.localDesktopControl;
   const persistedSessionSource = readPersistedSessionSource();
   let sessionSource: SessionSource = localDesktopControl
@@ -413,6 +424,8 @@ export function createApp(options: AppOptions = {}) {
     forceEndedThreadIds.clear();
     appServerHistoryLoadsByThreadId.clear();
     steeringThreads.clear();
+    desktopPendingActionsByThreadId.clear();
+    emittedDesktopActionIds.clear();
   }
   const threadOptions = { workingDirectory: workspacePath };
   function runThreadOperation<T>(threadId: string, operation: () => Promise<T>) {
@@ -2322,6 +2335,9 @@ export function createApp(options: AppOptions = {}) {
     // 已保证 completed/failed 不会被拉回 running，所以这里只需判断「是否可能还在跑」。
     const wasKnownRunning =
       activeAppServerTurnIdsByThreadId.has(threadId) || knownThread?.state === "running";
+    if (sessionSource === "desktop" && localDesktopControl) {
+      localDesktopControl.followThread(threadId);
+    }
     if (sessionSource === "desktop" && localDesktopControl && !appServer) {
       const desktopThread =
         threads.get(threadId) ??
@@ -2846,8 +2862,59 @@ export function createApp(options: AppOptions = {}) {
     }
 
     pendingApprovals.delete(approvalId);
+    if (pending.desktop && localDesktopControl) {
+      try {
+        await localDesktopControl.resolveApproval({
+          threadId: pending.threadId,
+          requestId: pending.desktop.requestId,
+          approvalKind:
+            pending.kind === "structuredUserInput"
+              ? "input"
+              : pending.kind === "fileChange"
+                ? "file"
+                : pending.kind === "permissions"
+                  ? "permissions"
+                  : "command",
+          decision: desktopApprovalDecision(parsed.data.decision),
+          answers: parsed.data.answers,
+        });
+      } catch (error) {
+        pendingApprovals.set(approvalId, pending);
+        return secureJson(
+          c,
+          options.pairing,
+          secureSessionsByTokenHash,
+          apiError("desktop_approval_failed", errorMessage(error)),
+          502,
+        );
+      }
+      if (pending.messageId) {
+        markApprovalMessageResolved(
+          messagesByThreadId,
+          pending.threadId,
+          pending.messageId,
+          parsed.data.decision,
+        );
+      }
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        ResolveApprovalResponseSchema.parse({ ok: true }),
+      );
+    }
+    if (!pending.appServer) {
+      pendingApprovals.set(approvalId, pending);
+      return secureJson(
+        c,
+        options.pairing,
+        secureSessionsByTokenHash,
+        apiError("approval_backend_unavailable", "Approval backend is not available."),
+        502,
+      );
+    }
     const resolution = resolveAppServerRequest(
-      pending,
+      { ...pending, appServer: pending.appServer },
       parsed.data.decision,
       parsed.data.answers ?? [],
     )
@@ -3787,6 +3854,7 @@ export function createApp(options: AppOptions = {}) {
         }
         if (sessionSource === "desktop" && runOptions.prompt && localDesktopControl) {
           forceEndedThreadIds.delete(threadId);
+          localDesktopControl.followThread(threadId);
           relayDebugLog("thread.stream.local_desktop_started", {
             threadId,
             workspacePath: knownThread.cwd ?? workspacePath,
@@ -3794,9 +3862,12 @@ export function createApp(options: AppOptions = {}) {
           void runLocalDesktopPromptStreamed({
             closeStream,
             controller,
+            desktopPendingActionsByThreadId,
             encoder,
+            emittedDesktopActionIds,
             localDesktopControl,
             messagesByThreadId,
+            pendingApprovals,
             prompt: runOptions.prompt,
             promptOptions: desktopPromptOptions(runOptions),
             pushNotificationDispatcher,
@@ -3815,6 +3886,7 @@ export function createApp(options: AppOptions = {}) {
           return;
         }
         if (sessionSource === "desktop" && localDesktopControl) {
+          localDesktopControl.followThread(threadId);
           relayDebugLog("thread.stream.local_desktop_attached", {
             threadId,
             workspacePath: knownThread.cwd ?? workspacePath,
@@ -3822,9 +3894,12 @@ export function createApp(options: AppOptions = {}) {
           void runLocalDesktopPromptStreamed({
             closeStream,
             controller,
+            desktopPendingActionsByThreadId,
             encoder,
+            emittedDesktopActionIds,
             localDesktopControl,
             messagesByThreadId,
+            pendingApprovals,
             prompt: undefined,
             promptOptions: undefined,
             pushNotificationDispatcher,
@@ -4498,9 +4573,12 @@ async function runPromptStreamed(input: {
 async function runLocalDesktopPromptStreamed(input: {
   closeStream: () => void;
   controller: ReadableStreamDefaultController<Uint8Array>;
+  desktopPendingActionsByThreadId: Map<string, DesktopPendingAction[]>;
+  emittedDesktopActionIds: Set<string>;
   encoder: TextEncoder;
   localDesktopControl: LocalDesktopControl;
   messagesByThreadId: Map<string, ChatMessage[]>;
+  pendingApprovals: Map<string, PendingApproval>;
   prompt?: string;
   promptOptions?: DesktopPromptRuntimeOptions;
   pushNotificationDispatcher?: PushNotificationDispatcher;
@@ -4613,6 +4691,7 @@ async function runLocalDesktopPromptStreamed(input: {
       if (rollout.messages.length === 0) {
         return;
       }
+      syncDesktopPendingActions(input, threadSummary);
       const turnCompletedAfterBaseline =
         input.prompt === undefined
           ? rollout.lastTaskCompleteAt !== undefined
@@ -4679,6 +4758,158 @@ async function runLocalDesktopPromptStreamed(input: {
   }, 500);
 
   return finishedPromise;
+}
+
+function syncDesktopPendingActions(
+  input: {
+    controller: ReadableStreamDefaultController<Uint8Array>;
+    desktopPendingActionsByThreadId: Map<string, DesktopPendingAction[]>;
+    emittedDesktopActionIds: Set<string>;
+    encoder: TextEncoder;
+    messagesByThreadId: Map<string, ChatMessage[]>;
+    pendingApprovals: Map<string, PendingApproval>;
+    secureSession?: SecureSessionHandle;
+    threadId: string;
+    threads: Map<string, ThreadMetadata>;
+  },
+  threadSummary: ThreadMetadata | undefined,
+) {
+  const actions = input.desktopPendingActionsByThreadId.get(input.threadId) ?? [];
+  if (actions.length === 0) {
+    return;
+  }
+  for (const action of actions) {
+    if (input.emittedDesktopActionIds.has(action.id)) {
+      continue;
+    }
+    input.emittedDesktopActionIds.add(action.id);
+    const approval = desktopPendingApprovalFromAction(action);
+    if (!approval) {
+      continue;
+    }
+    if (approval.kind === "structuredUserInput") {
+      input.pendingApprovals.set(approval.approvalId, {
+        desktop: {
+          method: action.method,
+          requestId: action.id,
+        },
+        kind: approval.kind,
+        method: action.method,
+        questions: approval.questions,
+        requestId: Number(action.id) || 0,
+        threadId: action.threadId,
+      });
+      if (threadSummary) {
+        sendSse(input.controller, input.encoder, input.secureSession, {
+          type: "thread.input_request.created",
+          thread: threadSummary,
+          request: pendingInputRequestFromApproval(approval, action.threadId),
+        });
+      }
+      continue;
+    }
+    const message = appendMessage(input.messagesByThreadId, action.threadId, {
+      role: "status",
+      kind: "approvalRequest",
+      content: approval.content,
+      details: approval.details,
+      state: "completed",
+      turnId: firstString(action.params, ["turnId", "turn_id"]),
+    });
+    input.pendingApprovals.set(approval.approvalId, {
+      desktop: {
+        method: action.method,
+        requestId: action.id,
+      },
+      kind: approval.kind,
+      messageId: message.id,
+      method: action.method,
+      requestId: Number(action.id) || 0,
+      threadId: action.threadId,
+    });
+    if (threadSummary) {
+      sendSse(input.controller, input.encoder, input.secureSession, {
+        type: "thread.message.created",
+        thread: threadSummary,
+        message,
+      });
+    }
+  }
+  input.desktopPendingActionsByThreadId.delete(input.threadId);
+}
+
+function desktopPendingApprovalFromAction(action: DesktopPendingAction) {
+  const params = action.params;
+  const approvalId = `approval-${action.id}`;
+  const threadId = action.threadId;
+  const turnId = firstString(params, ["turnId", "turn_id"]) || undefined;
+  switch (action.method) {
+    case "item/commandExecution/requestApproval": {
+      const command = firstString(params, ["command"]) ?? "Command execution";
+      return {
+        approvalId,
+        content: command,
+        details: {
+          approvalId,
+          approvalKind: "commandExecution",
+          command,
+          cwd: firstString(params, ["cwd"]),
+          reason: firstString(params, ["reason"]),
+        },
+        kind: "commandExecution" as const,
+        threadId,
+        turnId,
+      };
+    }
+    case "item/fileChange/requestApproval":
+    case "item/fileRead/requestApproval":
+      return {
+        approvalId,
+        content: firstString(params, ["reason"]) ?? "Approve file access",
+        details: {
+          approvalId,
+          approvalKind: "fileChange",
+          grantRoot: firstString(params, ["grantRoot", "path", "file"]),
+          reason: firstString(params, ["reason"]),
+        },
+        kind: "fileChange" as const,
+        threadId,
+        turnId,
+      };
+    case "item/permissions/requestApproval":
+      return {
+        approvalId,
+        content: firstString(params, ["reason"]) ?? "Approve additional permissions",
+        details: {
+          approvalId,
+          approvalKind: "permissions",
+          cwd: firstString(params, ["cwd"]),
+          permissions: params.permissions,
+          reason: firstString(params, ["reason"]),
+        },
+        kind: "permissions" as const,
+        threadId,
+        turnId,
+      };
+    case "item/tool/requestUserInput": {
+      const questions = pendingInputQuestions(params.questions);
+      return {
+        approvalId,
+        content: "Input requested",
+        details: {
+          approvalId,
+          approvalKind: "structuredUserInput",
+          questions,
+        },
+        kind: "structuredUserInput" as const,
+        questions,
+        threadId,
+        turnId,
+      };
+    }
+    default:
+      return undefined;
+  }
 }
 
 function isDuplicateLocalUserMessage(message: ChatMessage, previousMessages: ChatMessage[]) {
@@ -7467,6 +7698,21 @@ function desktopPromptOptions(options: RuntimeOptionSubset): DesktopPromptRuntim
   };
 }
 
+function desktopApprovalDecision(decision: "approve" | "approve-for-session" | "deny" | "cancel") {
+  switch (decision) {
+    case "approve":
+      return "accept";
+    case "approve-for-session":
+      return "acceptForSession";
+    case "deny":
+      return "decline";
+    case "cancel":
+      return "cancel";
+    default:
+      return "cancel";
+  }
+}
+
 function resolveRuntimeOptions(
   runtimeMode: RuntimeMode | undefined,
 ): Parameters<CodexClient["startThread"]>[0] {
@@ -9918,7 +10164,7 @@ function structuredUserInputResponse(
 }
 
 async function resolveAppServerRequest(
-  pending: PendingApproval,
+  pending: PendingApproval & { appServer: CodexAppServerClient },
   decision: "approve" | "approve-for-session" | "deny" | "cancel",
   answers: string[],
 ) {

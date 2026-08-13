@@ -30,7 +30,18 @@ type IpcEnvelope = {
   resultType?: string;
   result?: unknown;
   error?: unknown;
+  sourceClientId?: string;
+  version?: number;
+  params?: Record<string, unknown>;
   request?: { method?: string; params?: Record<string, unknown> };
+};
+
+export type DesktopIpcBroadcastEnvelope = {
+  method?: string;
+  params?: Record<string, unknown>;
+  sourceClientId?: string;
+  type: "broadcast";
+  version?: number;
 };
 
 export type DesktopIpcClient = {
@@ -40,9 +51,13 @@ export type DesktopIpcClient = {
 };
 
 export function createDesktopIpcClient(
-  options: { requestTimeoutMs?: number } = {},
+  options: {
+    onBroadcast?: (envelope: DesktopIpcBroadcastEnvelope) => void;
+    requestTimeoutMs?: number;
+  } = {},
 ): DesktopIpcClient {
   const requestTimeoutMs = options.requestTimeoutMs ?? 6_000;
+  const onBroadcast = options.onBroadcast;
   let socket: net.Socket | null = null;
   let clientId = "";
   let initialized = false;
@@ -98,6 +113,16 @@ export function createDesktopIpcClient(
   }
 
   function handleEnvelope(envelope: IpcEnvelope) {
+    if (envelope.type === "broadcast") {
+      onBroadcast?.({
+        method: envelope.method,
+        params: envelope.params,
+        sourceClientId: envelope.sourceClientId,
+        type: "broadcast",
+        version: envelope.version,
+      });
+      return;
+    }
     if (envelope.type === "client-discovery-request") {
       writeFrame(
         JSON.stringify({
