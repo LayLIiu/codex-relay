@@ -4651,6 +4651,7 @@ async function runLocalDesktopPromptStreamed(input: {
 
   let previousMessages = input.messagesByThreadId.get(input.threadId) ?? [];
   let idlePolls = 0;
+  let lastSseActivityAt = Date.now();
   let finished = false;
   let resolveFinished = () => {};
   const finishedPromise = new Promise<void>((resolve) => {
@@ -4687,6 +4688,13 @@ async function runLocalDesktopPromptStreamed(input: {
       return;
     }
     try {
+      if (Date.now() - lastSseActivityAt >= 15_000) {
+        if (!enqueueSseChunk(input.controller, input.encoder.encode(": keep-alive\n\n"))) {
+          finish();
+          return;
+        }
+        lastSseActivityAt = Date.now();
+      }
       const rollout = readRolloutThreadMessages(input.threadId, input.workspacePath);
       if (rollout.messages.length === 0) {
         return;
