@@ -258,12 +258,14 @@ type PairingOptions = {
 type ThreadMetadata = ThreadSummary;
 type RuntimeOptionSubset = {
   approvalPolicy?: string;
+  attachments?: PromptAttachment[];
   collaborationMode?: ThreadCollaborationMode;
   model?: string;
   serviceTier?: string;
   reasoningEffort?: string;
   runtimeMode?: RuntimeMode;
   sandboxMode?: string;
+  skills?: PromptSkill[];
 };
 
 const PairApproveRequestSchema = z.object({
@@ -7454,12 +7456,14 @@ function withRuntimePreferences<T extends RuntimeOptionSubset>(
 function desktopPromptOptions(options: RuntimeOptionSubset): DesktopPromptRuntimeOptions {
   return {
     approvalPolicy: options.approvalPolicy,
+    attachments: options.attachments,
     collaborationMode: options.collaborationMode,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     runtimeMode: options.runtimeMode,
     sandboxMode: options.sandboxMode,
     serviceTier: options.serviceTier,
+    skills: options.skills,
   };
 }
 

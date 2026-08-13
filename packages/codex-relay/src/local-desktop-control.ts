@@ -7,6 +7,7 @@ import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import type { PromptAttachment, PromptSkill } from "./api-schema.js";
 import { relayDebugLog } from "./debug-log.js";
 import { createDesktopIpcClient } from "./desktop-ipc.js";
 
@@ -32,12 +33,14 @@ export type LocalDesktopModel = {
 
 export type DesktopPromptRuntimeOptions = {
   approvalPolicy?: string;
+  attachments?: PromptAttachment[];
   collaborationMode?: unknown;
   model?: string;
   reasoningEffort?: string;
   runtimeMode?: string;
   sandboxMode?: string;
   serviceTier?: string;
+  skills?: PromptSkill[];
 };
 
 export type LocalDesktopControl = {
@@ -577,7 +580,11 @@ export function createLocalDesktopControl(
     }
     await desktopIpc.sendRequest("thread-follower-steer-turn", {
       conversationId: input.threadId,
-      input: [{ type: "text", text: input.prompt }],
+      input: desktopTurnInput(
+        input.prompt,
+        input.options?.attachments ?? [],
+        input.options?.skills ?? [],
+      ),
     });
   }
 
@@ -599,7 +606,11 @@ export function createLocalDesktopControl(
     }
     const steerParams: Record<string, unknown> = {
       conversationId: input.threadId,
-      input: [{ type: "text", text: input.prompt }],
+      input: desktopTurnInput(
+        input.prompt,
+        input.options?.attachments ?? [],
+        input.options?.skills ?? [],
+      ),
     };
     if (input.expectedTurnId?.trim()) {
       steerParams.expectedTurnId = input.expectedTurnId.trim();
@@ -639,6 +650,25 @@ export function createLocalDesktopControl(
     });
   }
 
+  function desktopTurnInput(
+    prompt: string,
+    attachments: PromptAttachment[],
+    skills: PromptSkill[],
+  ): Array<Record<string, unknown>> {
+    const input: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
+    for (const attachment of attachments) {
+      if (attachment.path) {
+        input.push({ type: "localImage", path: attachment.path });
+      } else if (attachment.url) {
+        input.push({ type: "image", url: attachment.url });
+      }
+    }
+    for (const skill of skills) {
+      input.push({ type: "skill", name: skill.name, path: skill.path });
+    }
+    return input;
+  }
+
   async function sendPromptViaDesktopIpc(input: {
     prompt: string;
     threadId: string;
@@ -650,7 +680,7 @@ export function createLocalDesktopControl(
       senderRequestId: randomUUID(),
       turnStartParams: {
         threadId: input.threadId,
-        input: [{ type: "text", text: input.prompt }],
+        input: desktopTurnInput(input.prompt, options.attachments ?? [], options.skills ?? []),
         cwd: env.CODEX_RELAY_WORKSPACE_PATH || process.cwd(),
         ...(options.model?.trim() ? { model: options.model.trim() } : {}),
         ...(options.reasoningEffort?.trim() ? { effort: options.reasoningEffort.trim() } : {}),
