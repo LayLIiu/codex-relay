@@ -844,10 +844,12 @@ describe("Codex Relay server routes", () => {
       const response = await app.request(`/v1/threads/${threadId}`);
       const body = await response.json();
       expect(response.status).toBe(200);
-      expect(body.messages.some(
-        (message: { role: string; kind: string }) =>
-          message.role === "reasoning" && message.kind === "thinking",
-      )).toBe(true);
+      expect(
+        body.messages.some(
+          (message: { role: string; kind: string }) =>
+            message.role === "reasoning" && message.kind === "thinking",
+        ),
+      ).toBe(true);
       const thinking = body.messages.find(
         (message: { role: string; kind: string }) =>
           message.role === "reasoning" && message.kind === "thinking",
@@ -2010,6 +2012,41 @@ describe("Codex Relay server routes", () => {
     expect(body.thread).toMatchObject({ cwd: appPath });
   });
 
+  it("starts a rootless chat thread under Documents/Codex", async () => {
+    const homePath = await mkdtemp(join(tmpdir(), "codex-relay-home-"));
+    const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = homePath;
+    const startOptions: Parameters<CodexClient["startThread"]>[0][] = [];
+    try {
+      const app = createApp({
+        appServer: null,
+        codex: createMockCodex({ onStartThread: (options) => startOptions.push(options) }),
+        workspacePath,
+      });
+
+      const response = await app.request("/v1/threads", {
+        method: "POST",
+        body: JSON.stringify({ scope: "chat", title: "Quick idea", promptHint: "Quick idea" }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = await response.json();
+
+      expect(response.status).toBe(201);
+      const workingDirectory = startOptions[0]?.workingDirectory;
+      expect(workingDirectory).toBeDefined();
+      expect(workingDirectory).toContain(join(homePath, "Documents", "Codex"));
+      expect(workingDirectory).toContain("quick-idea");
+      expect(body.thread.cwd).toBe(workingDirectory);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
   it("continues a thread in a new chat using the source workspace", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "codex-relay-workspace-"));
     const startOptions: Parameters<CodexClient["startThread"]>[0][] = [];
@@ -2080,9 +2117,7 @@ describe("Codex Relay server routes", () => {
     expect(worktreePath).toContain("-codex-");
     expect(continueBody.workspacePath).toBe(worktreePath);
     expect(continueBody.thread).toMatchObject({ cwd: worktreePath });
-    await expect(readFile(join(worktreePath, "README.md"), "utf8")).resolves.toBe(
-      "# Worktree\n",
-    );
+    await expect(readFile(join(worktreePath, "README.md"), "utf8")).resolves.toBe("# Worktree\n");
   });
 
   it("archives in-memory threads", async () => {
@@ -7080,8 +7115,9 @@ describe("Codex Relay server routes", () => {
             message.role === "user" && message.content === "check tools",
         ),
       ).toHaveLength(1);
-      expect(body.messages.some((message: { kind: string }) => message.kind === "commandExecution"))
-        .toBe(true);
+      expect(
+        body.messages.some((message: { kind: string }) => message.kind === "commandExecution"),
+      ).toBe(true);
       expect(
         body.messages.find((message: { kind: string }) => message.kind === "commandExecution"),
       ).toMatchObject({

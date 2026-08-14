@@ -2961,9 +2961,16 @@ export function createApp(options: AppOptions = {}) {
       );
     }
 
+    const requestedWorkspacePath =
+      parsed.data.scope === "chat" && !parsed.data.workspacePath
+        ? await createRootlessChatRoot({
+            promptHint: parsed.data.promptHint ?? parsed.data.prompt,
+            title: parsed.data.title,
+          })
+        : parsed.data.workspacePath;
     const selectedWorkspacePath = await validateThreadWorkspacePath(
       workspacePath,
-      parsed.data.workspacePath,
+      requestedWorkspacePath,
     );
     if (!selectedWorkspacePath.success) {
       return secureJson(
@@ -2978,7 +2985,7 @@ export function createApp(options: AppOptions = {}) {
     if (sessionSource === "desktop" && localDesktopControl) {
       try {
         const created = await localDesktopControl.newThread({
-          scope: parsed.data.workspacePath ? "project" : "conversation",
+          scope: "project",
           workspacePath: selectedWorkspacePath.path,
         });
         if (!created.threadId) {
@@ -4042,6 +4049,43 @@ async function validateThreadWorkspacePath(rootPath: string, requestedPath: stri
   }
 
   return { success: true as const, path: resolved };
+}
+
+function projectlessChatRootBasePath() {
+  return join(homedir(), "Documents", "Codex");
+}
+
+function rootlessChatSlugFromPromptHint(promptHint: string | undefined, title: string | undefined) {
+  const source = (promptHint || title || "new chat").trim().toLowerCase();
+  const words = source
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/giu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 6);
+  const slug = words
+    .join("-")
+    .slice(0, 60)
+    .replace(/^-+|-+$/g, "");
+  return slug.length > 0 ? slug : "new-chat";
+}
+
+async function createRootlessChatRoot(input: { promptHint?: string; title?: string }) {
+  const date = new Date().toISOString().slice(0, 10);
+  const basePath = join(projectlessChatRootBasePath(), date);
+  const baseSlug = rootlessChatSlugFromPromptHint(input.promptHint, input.title);
+  await mkdir(basePath, { recursive: true });
+  for (let attempt = 1; attempt <= 100; attempt += 1) {
+    const slug = attempt === 1 ? baseSlug : `${baseSlug}-${attempt}`;
+    const candidate = join(basePath, slug);
+    if (!existsSync(candidate)) {
+      await mkdir(candidate, { recursive: true });
+      return candidate;
+    }
+  }
+  const fallback = join(basePath, `${baseSlug}-${Date.now()}`);
+  await mkdir(fallback, { recursive: true });
+  return fallback;
 }
 
 async function createApprovalCode(sessions: PairingSessionStore) {
@@ -10666,11 +10710,11 @@ function normalizeFileChanges(
             additions:
               typeof additions === "number" && Number.isFinite(additions)
                 ? Math.max(0, Math.floor(additions))
-                : patchStats?.additions ?? 0,
+                : (patchStats?.additions ?? 0),
             deletions:
               typeof deletions === "number" && Number.isFinite(deletions)
                 ? Math.max(0, Math.floor(deletions))
-                : patchStats?.deletions ?? 0,
+                : (patchStats?.deletions ?? 0),
             kind,
             path: rolloutPatchDisplayPath(path, workspacePath),
           },

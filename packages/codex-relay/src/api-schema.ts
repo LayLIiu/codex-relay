@@ -676,6 +676,8 @@ export const ErrorResponseSchema = z.object({
 export const CreateThreadRequestSchema = z
   .object({
     prompt: z.string().trim().min(1).optional(),
+    promptHint: z.string().trim().min(1).max(500).optional(),
+    scope: z.enum(["project", "chat"]).optional(),
     title: z.string().trim().min(1).max(120).optional(),
     workspacePath: z.string().trim().min(1).optional(),
   })
