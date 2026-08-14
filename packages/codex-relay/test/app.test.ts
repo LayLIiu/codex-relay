@@ -7329,10 +7329,13 @@ describe("Codex Relay server routes", () => {
       });
       expect(body.messages[0].details.changes).toEqual([
         {
+          additions: 1,
+          deletions: 1,
           kind: "modified",
           path: "src/app.ts",
         },
       ]);
+      expect(body.messages[0].details.stats).toEqual({ additions: 1, deletions: 1 });
       expect(body.messages[0].details.patch).toContain("+new");
       expect(body.messages[0].details.patchOriginalLength).toBe(patch.length);
       expect(body.messages[0].details.patchTruncated).toBe(false);
@@ -7410,14 +7413,19 @@ describe("Codex Relay server routes", () => {
       expect(fileChanges).toHaveLength(1);
       expect(fileChanges[0].details.changes).toEqual([
         {
+          additions: 1,
+          deletions: 0,
           kind: "modified",
           path: "README.md",
         },
         {
+          additions: 0,
+          deletions: 1,
           kind: "modified",
           path: "TRADEMARKS.md",
         },
       ]);
+      expect(fileChanges[0].details.stats).toEqual({ additions: 1, deletions: 1 });
       expect(fileChanges[0].details.patch).toContain("*** Update File: README.md");
       expect(fileChanges[0].details.patch).toContain("*** Update File: TRADEMARKS.md");
       expect(fileChanges[0].details.patch).toContain("+world");
@@ -7527,14 +7535,19 @@ describe("Codex Relay server routes", () => {
       });
       expect(body.messages[1].details.changes).toEqual([
         {
+          additions: 3,
+          deletions: 0,
           kind: "added",
           path: "apps/mobile/src/components/ui/toast.tsx",
         },
         {
+          additions: 1,
+          deletions: 1,
           kind: "modified",
           path: "apps/mobile/src/components/ui/status-toast.tsx",
         },
       ]);
+      expect(body.messages[1].details.stats).toEqual({ additions: 4, deletions: 1 });
       expect(body.messages[1].details.patch).toContain("*** Add File");
       expect(body.messages[1].details.patchOriginalLength).toBe(patch.length);
       expect(body.messages[1].details.patchTruncated).toBe(false);

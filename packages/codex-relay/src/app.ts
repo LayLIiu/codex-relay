@@ -8694,7 +8694,9 @@ function isRolloutTaskComplete(record: { payload?: Record<string, unknown>; type
 }
 
 type RolloutPatchChange = {
+  additions?: number;
   callId?: string;
+  deletions?: number;
   kind: string;
   patch?: string;
   path: string;
@@ -8876,6 +8878,7 @@ function rolloutRecordMessage(
         patch: patchPreview?.text,
         patchOriginalLength: patchPreview?.originalLength,
         patchTruncated: patchPreview?.truncated,
+        stats: rolloutPatchChangeStats(changes),
       },
     });
   }
@@ -8990,10 +8993,15 @@ function collectRolloutApplyPatchOutput(
   }
 
   const patch = callId ? applyPatchInputs.get(callId) : undefined;
+  const patchStatsByPath = rolloutPatchStatsByPath(patch ?? "", workspacePath);
+  const fallbackPatchStats = countPatchLines(patch ?? "");
   for (const change of changes) {
+    const stats = patchStatsByPath.get(change.path) ?? fallbackPatchStats;
     pendingApplyPatchChanges.push({
       ...change,
+      additions: stats.additions,
       callId,
+      deletions: stats.deletions,
       patch,
     });
   }
@@ -9024,6 +9032,7 @@ function rolloutApplyPatchSummaryMessage(
       patch: patchPreview?.text,
       patchOriginalLength: patchPreview?.originalLength,
       patchTruncated: patchPreview?.truncated,
+      stats: rolloutPatchChangeStats(pendingApplyPatchChanges),
     },
   });
 }
@@ -9052,6 +9061,58 @@ function rolloutPatchPreview(changes: RolloutPatchChange[]) {
       return [`*** ${patchHeaderChangeKind(change.kind)} File: ${change.path}\n${change.patch}`];
     })
     .join("\n");
+}
+
+function rolloutPatchChangeStats(changes: RolloutPatchChange[]) {
+  return {
+    additions: changes.reduce((total, change) => total + (change.additions ?? 0), 0),
+    deletions: changes.reduce((total, change) => total + (change.deletions ?? 0), 0),
+  };
+}
+
+function rolloutPatchStatsByPath(patch: string, workspacePath = defaultWorkspacePath) {
+  const statsByPath = new Map<string, { additions: number; deletions: number }>();
+  if (!patch.trim()) {
+    return statsByPath;
+  }
+
+  for (const [path, section] of splitDiffByPath(patch)) {
+    statsByPath.set(rolloutPatchDisplayPath(path, workspacePath), countPatchLines(section));
+  }
+
+  let currentPath: string | undefined;
+  let currentSection: string[] = [];
+  const flush = () => {
+    if (!currentPath) {
+      return;
+    }
+    statsByPath.set(
+      rolloutPatchDisplayPath(currentPath, workspacePath),
+      countPatchLines(currentSection.join("\n")),
+    );
+  };
+
+  for (const line of patch.split("\n")) {
+    const header = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$/);
+    if (header) {
+      flush();
+      currentPath = header[1];
+      currentSection = [line];
+      continue;
+    }
+    if (line.startsWith("*** End Patch")) {
+      flush();
+      currentPath = undefined;
+      currentSection = [];
+      continue;
+    }
+    if (currentPath) {
+      currentSection.push(line);
+    }
+  }
+  flush();
+
+  return statsByPath;
 }
 
 function hasPatchFileHeader(patch: string) {
@@ -9119,10 +9180,14 @@ function rolloutPatchApplyChanges(
 
     const record = rawChange as Record<string, unknown>;
     const type = firstString(record, ["type"]) ?? "modified";
+    const patch = firstString(record, ["unified_diff", "patch"]);
+    const stats = countPatchLines(patch ?? "");
     return [
       {
+        additions: stats.additions,
+        deletions: stats.deletions,
         kind: rolloutPatchChangeKind(type),
-        patch: firstString(record, ["unified_diff", "patch"]),
+        patch,
         path: rolloutPatchDisplayPath(rawPath, workspacePath),
       },
     ];
@@ -9358,7 +9423,8 @@ function mapAppServerItem(threadId: string, turn: AppServerTurn, item: AppServer
     }
     case "fileChange": {
       const fileItem = item as Extract<AppServerThreadItem, { type: "fileChange" }>;
-      const changes = fileItem.changes ?? [];
+      const patch = fileItem.patch ?? undefined;
+      const changes = normalizeFileChanges(fileItem.changes ?? [], patch);
       const patchPreview = largeTextPreview(fileItem.patch);
       return ChatMessageSchema.parse({
         ...base,
@@ -9370,6 +9436,7 @@ function mapAppServerItem(threadId: string, turn: AppServerTurn, item: AppServer
           patch: patchPreview?.text,
           patchOriginalLength: patchPreview?.originalLength,
           patchTruncated: patchPreview?.truncated,
+          stats: rolloutPatchChangeStats(changes),
         },
       });
     }
@@ -9763,10 +9830,17 @@ function structuredStreamMessage(
     }
     case "file_change": {
       const changes = Array.isArray(item?.changes) ? item.changes : [];
+      const patch = firstString(item, ["patch"]);
+      const normalizedChanges = normalizeFileChanges(changes, patch);
       return {
         kind: "fileChange",
-        content: summarizeFileChanges(normalizeFileChanges(changes)),
-        details: { changes, patch: firstString(item, ["patch"]), type },
+        content: summarizeFileChanges(normalizedChanges),
+        details: {
+          changes: normalizedChanges,
+          patch,
+          stats: rolloutPatchChangeStats(normalizedChanges),
+          type,
+        },
       };
     }
     case "mcp_tool_call":
@@ -10567,7 +10641,12 @@ function rolloutReasoningTextParts(value: unknown): string[] {
   return parts;
 }
 
-function normalizeFileChanges(value: unknown[]) {
+function normalizeFileChanges(
+  value: unknown[],
+  patch?: string,
+  workspacePath = defaultWorkspacePath,
+): RolloutPatchChange[] {
+  const patchStatsByPath = rolloutPatchStatsByPath(patch ?? "", workspacePath);
   return value.flatMap((item) => {
     if (!item || typeof item !== "object") {
       return [];
@@ -10576,7 +10655,27 @@ function normalizeFileChanges(value: unknown[]) {
     const record = item as Record<string, unknown>;
     const path = firstString(record, ["path"]);
     const kind = firstString(record, ["kind", "type"]) ?? "modified";
-    return path ? [{ path, kind }] : [];
+    const additions = firstNumber(record, ["additions", "added", "insertions"]);
+    const deletions = firstNumber(record, ["deletions", "deleted", "removals"]);
+    const patchStats = path
+      ? patchStatsByPath.get(rolloutPatchDisplayPath(path, workspacePath))
+      : undefined;
+    return path
+      ? [
+          {
+            additions:
+              typeof additions === "number" && Number.isFinite(additions)
+                ? Math.max(0, Math.floor(additions))
+                : patchStats?.additions ?? 0,
+            deletions:
+              typeof deletions === "number" && Number.isFinite(deletions)
+                ? Math.max(0, Math.floor(deletions))
+                : patchStats?.deletions ?? 0,
+            kind,
+            path: rolloutPatchDisplayPath(path, workspacePath),
+          },
+        ]
+      : [];
   });
 }
 
