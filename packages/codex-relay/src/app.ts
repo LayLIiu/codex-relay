@@ -409,11 +409,21 @@ export function createApp(options: AppOptions = {}) {
     ReadableStreamDefaultController<Uint8Array>,
     () => void
   >();
+  const activeThreadStreams = new Map<
+    string,
+    {
+      close: () => void;
+      controller: ReadableStreamDefaultController<Uint8Array>;
+      encoder: TextEncoder;
+      secureSession: SecureSessionHandle | undefined;
+    }
+  >();
   function resetSessionSourceState() {
     for (const closeStream of activeStreamControllers.values()) {
       closeStream();
     }
     activeStreamControllers.clear();
+    activeThreadStreams.clear();
     threads.clear();
     messagesByThreadId.clear();
     liveThreads.clear();
@@ -531,6 +541,7 @@ export function createApp(options: AppOptions = {}) {
       !options.pairing ||
       c.req.method === "OPTIONS" ||
       c.req.path === apiPaths.version ||
+      c.req.path === "/v1/debug/input-request" ||
       c.req.path.startsWith(`${apiPaths.imageAttachments}/`) ||
       c.req.path === apiPaths.sessionsClear ||
       c.req.path.startsWith(apiPaths.pair)
@@ -787,6 +798,43 @@ export function createApp(options: AppOptions = {}) {
     });
 
     return secureJson(c, options.pairing, secureSessionsByTokenHash, response);
+  });
+
+  app.post("/v1/debug/input-request", async (c) => {
+    if (process.env.CODEX_RELAY_DEBUG !== "1") {
+      return c.json(apiError("not_found", "Debug input injection is not enabled."), 404);
+    }
+    const raw = await c.req.json().catch(() => undefined);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return c.json(apiError("invalid_request", "Invalid debug input request."), 400);
+    }
+    const record = raw as Record<string, unknown>;
+    const threadId = typeof record.threadId === "string" ? record.threadId.trim() : "";
+    const questions = pendingInputQuestions(record.questions);
+    if (!threadId || questions.length === 0 || !activeThreadStreams.has(threadId)) {
+      return c.json(apiError("not_found", "No active mobile stream for this thread."), 404);
+    }
+    const approvalId = `debug-input-${randomUUID()}`;
+    pendingApprovals.set(approvalId, {
+      appServer: appServer ?? undefined,
+      kind: "structuredUserInput",
+      method: "item/tool/requestUserInput",
+      questions,
+      requestId: -1,
+      threadId,
+    });
+    const threadSummary = updateThread(threads, messagesByThreadId, threadId, {
+      state: "running",
+    });
+    const stream = activeThreadStreams.get(threadId);
+    if (stream) {
+      sendSse(stream.controller, stream.encoder, stream.secureSession, {
+        type: "thread.input_request.created",
+        thread: threadSummary,
+        request: pendingInputRequestFromApproval({ approvalId, questions }, threadId),
+      });
+    }
+    return c.json({ ok: true });
   });
 
   app.post(apiPaths.desktopLaunch, async (c) => {
@@ -3819,9 +3867,18 @@ export function createApp(options: AppOptions = {}) {
           stopPreviewMonitor();
           attachmentAbortController.abort();
           activeStreamControllers.delete(controller);
+          if (activeThreadStreams.get(threadId)?.controller === controller) {
+            activeThreadStreams.delete(threadId);
+          }
           closeSseController(controller);
         };
         activeStreamControllers.set(controller, closeStream);
+        activeThreadStreams.set(threadId, {
+          close: closeStream,
+          controller,
+          encoder,
+          secureSession,
+        });
         relayDebugLog("thread.stream.started", {
           mode: !runOptions.prompt && appServer ? "attach" : "run",
           threadId,
@@ -10319,6 +10376,11 @@ async function resolveAppServerRequest(
       });
       return;
     case "structuredUserInput":
+      relayDebugLog("input.answer.submitted", {
+        answers,
+        requestId: pending.requestId,
+        threadId: pending.threadId,
+      });
       await pending.appServer.respondToRequest(
         pending.requestId,
         structuredUserInputResponse(pending.questions ?? [], decision, answers),
