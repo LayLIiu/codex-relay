@@ -22,17 +22,14 @@ import {
 import { createTursoPairingSessionStore } from "./pairing-store.js";
 import { codexRelayDataPath, legacyCodexRelayDataPath } from "./paths.js";
 import { createFileRuntimePreferencesStore } from "./preferences-store.js";
-import {
-  createHmsPushNotificationSender,
-  loadHmsPushConfiguration,
-} from "./push-notifications.js";
+import { createHmsPushNotificationSender, loadHmsPushConfiguration } from "./push-notifications.js";
 import {
   createServerIdentity,
   createServerIdentityFromPrivateKey,
   type ServerIdentity,
 } from "./secure-transport.js";
 
-const port = Number(process.env.PORT ?? 8787);
+const port = Number(process.env.PORT ?? 17878);
 const hostname = process.env.HOST ?? "0.0.0.0";
 const clientTokenTtlMs = 7 * 24 * 60 * 60 * 1000;
 const dangerouslyAutoApprove = process.env.CODEX_RELAY_DANGEROUSLY_AUTO_APPROVE === "1";
@@ -348,7 +345,7 @@ async function writeBackgroundPid() {
 }
 
 function formatApprovalCommand(approvalCode: string, activePort: number) {
-  return activePort === 8787
+  return activePort === 17878
     ? `${npxCommand} approve ${approvalCode}`
     : `PORT=${activePort} ${npxCommand} approve ${approvalCode}`;
 }

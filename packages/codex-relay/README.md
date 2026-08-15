@@ -135,11 +135,11 @@ Start the relay and automatically approve mobile pairing requests. Use this only
 
 ## Configuration
 
-The relay listens on `0.0.0.0:8787` by default. Configure it with environment variables:
+The relay listens on `0.0.0.0:17878` by default. Configure it with environment variables:
 
 | Variable                               | Purpose                                                                                                                                                         |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                                 | Server port. Defaults to `8787`.                                                                                                                                |
+| `PORT`                                 | Server port. Defaults to `17878`.                                                                                                                               |
 | `HOST`                                 | Listen host. Defaults to `0.0.0.0`.                                                                                                                             |
 | `CODEX_RELAY_WORKSPACE_PATH`           | Workspace path Codex should use. Defaults to the directory where you run `npx codex-relay@latest`.                                                              |
 | `CODEX_RELAY_AUTH_DB_PATH`             | Pairing and session database path. Defaults to `.codex-relay/auth.db`.                                                                                          |
@@ -147,21 +147,21 @@ The relay listens on `0.0.0.0:8787` by default. Configure it with environment va
 | `CODEX_RELAY_DANGEROUSLY_AUTO_APPROVE` | Set to `1` to auto-approve mobile pairing requests. Prefer the CLI flag for local use.                                                                          |
 | `CODEX_RELAY_APP_SERVER_MODE`          | Set to `socket` to require shared mode or `stdio` to require private mode. Unset prefers shared mode with startup fallback on macOS and private mode elsewhere. |
 | `CODEX_RELAY_HMS_SERVICE_ACCOUNT_PATH` | Path to a Huawei Push Kit service-account JSON file used for Harmony push delivery.                                                                             |
-| `CODEX_RELAY_HMS_SERVICE_ACCOUNT_JSON` | Inline Huawei Push Kit service-account JSON. Use only when a protected secret store cannot mount a file.                                                       |
+| `CODEX_RELAY_HMS_SERVICE_ACCOUNT_JSON` | Inline Huawei Push Kit service-account JSON. Use only when a protected secret store cannot mount a file.                                                        |
 | `CODEX_HOME`                           | Codex home directory, used when reading Codex session metadata.                                                                                                 |
 | `CODEX_BIN`                            | Codex CLI executable path.                                                                                                                                      |
-| `CODEX_DESKTOP_BIN`                    | Codex Desktop executable path. Defaults to the ChatGPT.app bundled binary when present.                                                                          |
-| `CODEX_DESKTOP_APP_PATH`               | Codex/ChatGPT desktop app bundle path used for official Remote Control device keys.                                                                              |
-| `CODEX_DESKTOP_CDP_PORT`               | Local Codex Desktop CDP debug port used by the local desktop bridge.                                                                                              |
-| `CODEX_DESKTOP_USE_CDP`                | Set to `1` to enable CDP launch/fallback paths. Off by default; desktop mode uses IPC and deep links.                                                              |
-| `CODEX_DESKTOP_LAUNCH_MODE`            | Set to `cdp` to use the bundled Codex CDP launcher app.                                                                                                            |
-| `CODEX_DESKTOP_BUNDLE_ID`              | Codex desktop app bundle identifier used for deeplink activation.                                                                                                |
-| `CODEX_DESKTOP_CDP_LAUNCHER_APP`       | Codex CDP launcher app bundle path.                                                                                                                               |
+| `CODEX_DESKTOP_BIN`                    | Codex Desktop executable path. Defaults to the ChatGPT.app bundled binary when present.                                                                         |
+| `CODEX_DESKTOP_APP_PATH`               | Codex/ChatGPT desktop app bundle path used for official Remote Control device keys.                                                                             |
+| `CODEX_DESKTOP_CDP_PORT`               | Local Codex Desktop CDP debug port used by the local desktop bridge.                                                                                            |
+| `CODEX_DESKTOP_USE_CDP`                | Set to `1` to enable CDP launch/fallback paths. Off by default; desktop mode uses IPC and deep links.                                                           |
+| `CODEX_DESKTOP_LAUNCH_MODE`            | Set to `cdp` to use the bundled Codex CDP launcher app.                                                                                                         |
+| `CODEX_DESKTOP_BUNDLE_ID`              | Codex desktop app bundle identifier used for deeplink activation.                                                                                               |
+| `CODEX_DESKTOP_CDP_LAUNCHER_APP`       | Codex CDP launcher app bundle path.                                                                                                                             |
 
 Examples:
 
 ```sh
-PORT=8788 npx codex-relay@latest
+PORT=17888 npx codex-relay@latest
 ```
 
 ```sh
@@ -234,4 +234,4 @@ Connection checklist:
 - Are the phone and computer on the same Wi-Fi or LAN?
 - If keeping the same network is difficult, are both devices connected through Tailscale or another reachable private network?
 - Can the phone open the exact `Mobile:` URL printed by the relay?
-- Does the computer firewall allow inbound traffic on the relay port, usually `8787`?
+- Does the computer firewall allow inbound traffic on the relay port, usually `17878`?

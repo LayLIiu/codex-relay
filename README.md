@@ -50,14 +50,14 @@ Relay 服务，手机通过局域网（或公网）与它配对，就能随时�
 
 本仓库是 pnpm monorepo，根工作区包含 `apps/*` 与 `packages/*`：
 
-| 路径 | 说明 |
-| --- | --- |
-| `packages/codex-relay` | 核心 Relay 服务端（Hono）。CLI + HTTP 服务 + 配对/会话管理，含 Vitest 测试。开发态默认监听 `8787` |
-| `packages/react-native-direct-fetch` | React Native 侧直连 Relay 的辅助库 |
-| `apps/mobile` | iOS 移动端（Expo + React Native + expo-router），用 dev-client 开发 |
-| `apps/hm_codex` | HarmonyOS 客户端（本机独立维护，暂未随仓库公开） |
-| `tools/relay-panel` | 网页版控制面板：一键启停 Relay、配对二维码、批准配对、看日志 |
-| `tools/relay-panel-desktop` | Electron 桌面版控制面板：把「面板 + Relay 服务器」打包成可双击运行的 App |
+| 路径                                 | 说明                                                                                               |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `packages/codex-relay`               | 核心 Relay 服务端（Hono）。CLI + HTTP 服务 + 配对/会话管理，含 Vitest 测试。开发态默认监听 `17878` |
+| `packages/react-native-direct-fetch` | React Native 侧直连 Relay 的辅助库                                                                 |
+| `apps/mobile`                        | iOS 移动端（Expo + React Native + expo-router），用 dev-client 开发                                |
+| `apps/hm_codex`                      | HarmonyOS 客户端（本机独立维护，暂未随仓库公开）                                                   |
+| `tools/relay-panel`                  | 网页版控制面板：一键启停 Relay、配对二维码、批准配对、看日志                                       |
+| `tools/relay-panel-desktop`          | Electron 桌面版控制面板：把「面板 + Relay 服务器」打包成可双击运行的 App                           |
 
 ## 快速开始（开发模式）
 
@@ -81,7 +81,7 @@ pnpm install
 pnpm dev
 ```
 
-等价于 `pnpm dev:server`（`tsx watch` 开发态，默认监听 `8787`）。服务端会打印
+等价于 `pnpm dev:server`（`tsx watch` 开发态，默认监听 `17878`）。服务端会打印
 配对二维码、手机 URL 与 `codex-relay://pair...` 配对链接。
 
 ### 3. 启动控制面板
@@ -148,21 +148,21 @@ npm run build:mac   # 生成 dist/ 下的 DMG（Windows 用 build:win，需在 W
 
 ## 常用命令
 
-| 命令 | 作用 |
-| --- | --- |
-| `pnpm dev` / `pnpm dev:server` | 启动 Relay 服务端（`tsx watch`，8787） |
-| `pnpm panel` | 启动网页版控制面板（7800） |
-| `pnpm panel:desktop` | Electron 开发模式运行桌面版 |
-| `pnpm panel:desktop:build` | 构建桌面版 macOS 安装包 |
-| `pnpm panel:desktop:build:win` | 在 Windows 上构建桌面版 Windows 安装包 |
-| `pnpm dev:mobile` | 启动 Expo Metro（dev-client） |
-| `pnpm dev:mobile:ios` | 构建并运行 iOS dev-client |
-| `pnpm dev:mobile:android` | 构建并运行 Android dev-client |
-| `pnpm codex-relay:cli` | 直接跑 relay CLI（开发态） |
-| `pnpm test` | 跑服务端 Vitest 套件 |
-| `pnpm typecheck` | 全仓 `tsc --noEmit` |
-| `pnpm lint` / `pnpm lint:fix` | oxlint + oxfmt 检查 / 自动修复 |
-| `pnpm format` | oxfmt 全仓格式化 |
+| 命令                           | 作用                                    |
+| ------------------------------ | --------------------------------------- |
+| `pnpm dev` / `pnpm dev:server` | 启动 Relay 服务端（`tsx watch`，17878） |
+| `pnpm panel`                   | 启动网页版控制面板（7800）              |
+| `pnpm panel:desktop`           | Electron 开发模式运行桌面版             |
+| `pnpm panel:desktop:build`     | 构建桌面版 macOS 安装包                 |
+| `pnpm panel:desktop:build:win` | 在 Windows 上构建桌面版 Windows 安装包  |
+| `pnpm dev:mobile`              | 启动 Expo Metro（dev-client）           |
+| `pnpm dev:mobile:ios`          | 构建并运行 iOS dev-client               |
+| `pnpm dev:mobile:android`      | 构建并运行 Android dev-client           |
+| `pnpm codex-relay:cli`         | 直接跑 relay CLI（开发态）              |
+| `pnpm test`                    | 跑服务端 Vitest 套件                    |
+| `pnpm typecheck`               | 全仓 `tsc --noEmit`                     |
+| `pnpm lint` / `pnpm lint:fix`  | oxlint + oxfmt 检查 / 自动修复          |
+| `pnpm format`                  | oxfmt 全仓格式化                        |
 
 ## 配置与环境变量
 
@@ -178,33 +178,33 @@ Relay 默认通过 Codex 桌面端本地的 `~/.codex/ipc/ipc.sock` 控制会话
 
 ### 环境变量
 
-Relay 服务端默认监听 `0.0.0.0:8787`：
+Relay 服务端默认监听 `0.0.0.0:17878`：
 
-| 变量 | 作用 | 默认 |
-| --- | --- | --- |
-| `PORT` | Relay 服务端口 | `8787` |
-| `HOST` | 监听地址 | `0.0.0.0` |
-| `CODEX_RELAY_WORKSPACE_PATH` | Codex 使用的工作区路径 | 当前目录 |
-| `CODEX_RELAY_AUTH_DB_PATH` | 配对与会话数据库路径 | — |
-| `CODEX_RELAY_APP_SERVER_MODE` | `socket` 共享终端/移动端会话 | `stdio` |
-| `CODEX_BIN` | Codex CLI 可执行文件路径 | — |
-| `CODEX_DESKTOP_BIN` | Codex 桌面端可执行文件路径，缺省优先使用 ChatGPT.app 内置二进制 | — |
-| `CODEX_DESKTOP_APP_PATH` | Codex/ChatGPT 桌面 App 路径，用于官方 Remote Control 设备密钥 | `/Applications/ChatGPT.app` |
-| `CODEX_DESKTOP_CDP_PORT` | 本地 Codex Desktop CDP 调试端口 | `39252` |
-| `CODEX_DESKTOP_USE_CDP` | 设为 `1` 时启用 CDP 启动/回退路径 | 空 |
-| `CODEX_DESKTOP_LAUNCH_MODE` | 设为 `cdp` 时使用 Codex CDP 启动器 | 空 |
-| `CODEX_DESKTOP_BUNDLE_ID` | Codex 桌面 App Bundle ID | `com.openai.codex` |
-| `CODEX_DESKTOP_CDP_LAUNCHER_APP` | Codex CDP 启动器 App 路径 | `tools/Codex CDP.app` |
-| `CODEX_HOME` | 读取本地会话元数据的 Codex 家目录 | — |
-| `EXPO_PUBLIC_CODEX_RELAY_SERVER_URL` | 移动端连接 Relay 的地址（真机用 `http://<局域网IP>:8787`） | `http://127.0.0.1:8787` |
+| 变量                                 | 作用                                                            | 默认                        |
+| ------------------------------------ | --------------------------------------------------------------- | --------------------------- |
+| `PORT`                               | Relay 服务端口                                                  | `17878`                     |
+| `HOST`                               | 监听地址                                                        | `0.0.0.0`                   |
+| `CODEX_RELAY_WORKSPACE_PATH`         | Codex 使用的工作区路径                                          | 当前目录                    |
+| `CODEX_RELAY_AUTH_DB_PATH`           | 配对与会话数据库路径                                            | —                           |
+| `CODEX_RELAY_APP_SERVER_MODE`        | `socket` 共享终端/移动端会话                                    | `stdio`                     |
+| `CODEX_BIN`                          | Codex CLI 可执行文件路径                                        | —                           |
+| `CODEX_DESKTOP_BIN`                  | Codex 桌面端可执行文件路径，缺省优先使用 ChatGPT.app 内置二进制 | —                           |
+| `CODEX_DESKTOP_APP_PATH`             | Codex/ChatGPT 桌面 App 路径，用于官方 Remote Control 设备密钥   | `/Applications/ChatGPT.app` |
+| `CODEX_DESKTOP_CDP_PORT`             | 本地 Codex Desktop CDP 调试端口                                 | `39252`                     |
+| `CODEX_DESKTOP_USE_CDP`              | 设为 `1` 时启用 CDP 启动/回退路径                               | 空                          |
+| `CODEX_DESKTOP_LAUNCH_MODE`          | 设为 `cdp` 时使用 Codex CDP 启动器                              | 空                          |
+| `CODEX_DESKTOP_BUNDLE_ID`            | Codex 桌面 App Bundle ID                                        | `com.openai.codex`          |
+| `CODEX_DESKTOP_CDP_LAUNCHER_APP`     | Codex CDP 启动器 App 路径                                       | `tools/Codex CDP.app`       |
+| `CODEX_HOME`                         | 读取本地会话元数据的 Codex 家目录                               | —                           |
+| `EXPO_PUBLIC_CODEX_RELAY_SERVER_URL` | 移动端连接 Relay 的地址（真机用 `http://<局域网IP>:17878`）     | `http://127.0.0.1:17878`    |
 
 控制面板：
 
-| 变量 | 作用 | 默认 |
-| --- | --- | --- |
-| `PANEL_PORT` | 面板端口 | `7800` |
-| `RELAY_PORT` | 面板管理的 Relay 端口 | `17878` |
-| `PUBLIC_URL` | 设置后生成公网配对码（如 `http://host:8789`），默认不写死 | 空 |
+| 变量         | 作用                                                      | 默认    |
+| ------------ | --------------------------------------------------------- | ------- |
+| `PANEL_PORT` | 面板端口                                                  | `7800`  |
+| `RELAY_PORT` | 面板管理的 Relay 端口                                     | `17878` |
+| `PUBLIC_URL` | 设置后生成公网配对码（如 `http://host:8789`），默认不写死 | 空      |
 
 后台运行时，运行时文件（日志、进程状态、配对数据）写在当前工作区的
 `.codex-relay/` 下。

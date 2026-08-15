@@ -17,7 +17,7 @@ export function relayServiceCommand(cliArgs) {
 
 export function relayHealthUrl(env = process.env) {
   const host = env.RELAY_HEALTH_CHECK_HOST ?? "127.0.0.1";
-  const port = env.CODEX_RELAY_PORT ?? env.PORT ?? "8787";
+  const port = env.CODEX_RELAY_PORT ?? env.PORT ?? "17878";
   return `http://${host}:${port}/version`;
 }
 

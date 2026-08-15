@@ -78,7 +78,7 @@ function spawnService(serviceCommand) {
     env: {
       ...process.env,
       NODE_ENV: "development",
-      PORT: process.env.CODEX_RELAY_PORT ?? process.env.PORT ?? "8787",
+      PORT: process.env.CODEX_RELAY_PORT ?? process.env.PORT ?? "17878",
     },
     stdio: "inherit",
   });

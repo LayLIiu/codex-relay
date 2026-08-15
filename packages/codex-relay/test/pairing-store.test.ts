@@ -29,7 +29,7 @@ describe("pairing session store", () => {
       clientEphemeralPublicKey: "public-key",
       clientNonce: "nonce",
       expiresAt,
-      serverUrl: "http://127.0.0.1:8787",
+      serverUrl: "http://127.0.0.1:17878",
     });
 
     const cleared = await sessions.clearAll();
@@ -303,7 +303,7 @@ describe("pairing session store", () => {
         clientNonce: "nonce",
         clientSessionId: "pending-session",
         expiresAt,
-        serverUrl: "http://127.0.0.1:8787",
+        serverUrl: "http://127.0.0.1:17878",
       });
     } finally {
       await rm(directory, { force: true, recursive: true });
@@ -447,7 +447,7 @@ function createLegacyAuthDatabase(
       "Phone",
       "public-key",
       "nonce",
-      "http://127.0.0.1:8787",
+      "http://127.0.0.1:17878",
       0,
       expiresAt,
       1,
