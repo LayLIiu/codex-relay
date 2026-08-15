@@ -69,7 +69,7 @@ Codex Relay for HarmonyOS 是一个面向鸿蒙用户的 Codex 远程控制方�
 ### 克隆并启动
 
 ```sh
-git clone -b main https://github.com/LayLIiu/codex-relay.git
+git clone -b main https://github.com/LayLIiu/codex-relay-hm.git
 cd codex-relay
 corepack enable
 pnpm install
