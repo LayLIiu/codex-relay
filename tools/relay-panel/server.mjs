@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile);
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 7800);
 const RELAY_PORT = Number(process.env.RELAY_PORT ?? 17878);
+const PANEL_TOKEN = process.env.PANEL_TOKEN ?? "000214";
 // 公网地址不写死：设置 PUBLIC_URL 环境变量才会生成公网配对码（如 http://host:8789）
 const PUBLIC_URL = process.env.PUBLIC_URL ?? "";
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -407,6 +408,22 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   try {
+    // 所有 API 请求都需要访问密码（/api/auth 本身除外），页面静态文件可公开加载
+    if (path.startsWith("/api/") && path !== "/api/auth") {
+      const provided = req.headers["x-panel-token"];
+      if (provided !== PANEL_TOKEN) {
+        return sendJson(res, 401, { ok: false, message: "需要访问密码" });
+      }
+    }
+
+    if (req.method === "POST" && path === "/api/auth") {
+      const body = await readBody(req);
+      if (body.token === PANEL_TOKEN) {
+        return sendJson(res, 200, { ok: true, message: "密码正确" });
+      }
+      return sendJson(res, 401, { ok: false, message: "访问密码错误" });
+    }
+
     if (req.method === "POST" && path === "/api/start") {
       const busy = await isRelayPortBusy();
       if (busy && !relayProcess) {
